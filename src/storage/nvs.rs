@@ -25,6 +25,10 @@ impl ConfigStore {
         Ok(Self { default_nvs })
     }
 
+    pub fn with_partition(default_nvs: EspDefaultNvsPartition) -> Self {
+        Self { default_nvs }
+    }
+
     pub fn save(&self, cfg: &DeviceConfig) -> Result<(), AppError> {
         {
             let mut wifi_nvs = EspNvs::new(self.default_nvs.clone(), WIFI_NS, true)?;

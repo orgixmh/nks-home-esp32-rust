@@ -6,8 +6,7 @@ pub enum BootMode {
     Provisioning,
 }
 
-pub fn detect_boot_mode() -> Result<BootMode, AppError> {
-    let store = ConfigStore::new()?;
+pub fn detect_boot_mode(store: &ConfigStore) -> Result<BootMode, AppError> {
     let cfg = store.load()?;
 
     match cfg {

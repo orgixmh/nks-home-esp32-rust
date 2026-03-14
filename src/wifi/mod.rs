@@ -1,7 +1,7 @@
 use core::convert::TryInto;
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
 use log::info;
@@ -9,13 +9,13 @@ use log::info;
 use crate::config::types::WifiConfig;
 use crate::error::AppError;
 
-pub fn connect_sta(cfg: &WifiConfig) -> Result<BlockingWifi<EspWifi<'static>>, AppError> {
+pub fn connect_sta(
+    modem: Modem,
+    sys_loop: EspSystemEventLoop,
+    nvs: EspDefaultNvsPartition,
+    cfg: &WifiConfig,
+) -> Result<BlockingWifi<EspWifi<'static>>, AppError> {
     info!("Initializing Wi-Fi station mode");
-
-    let peripherals = Peripherals::take()
-        .map_err(|e| AppError::Message(format!("Failed to take ESP peripherals: {e:?}")))?;
-    let sys_loop = EspSystemEventLoop::take()?;
-    let nvs = EspDefaultNvsPartition::take()?;
 
     let auth_method = if cfg.password.is_empty() {
         AuthMethod::None
@@ -38,12 +38,11 @@ pub fn connect_sta(cfg: &WifiConfig) -> Result<BlockingWifi<EspWifi<'static>>, A
         ..Default::default()
     });
 
-    let mut wifi = BlockingWifi::wrap(
-        EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?,
-        sys_loop,
-    )?;
+    info!("Creating ESP Wi-Fi driver");
+    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), Some(nvs))?, sys_loop)?;
 
     wifi.set_configuration(&wifi_configuration)?;
+    info!("Wi-Fi configuration applied");
     wifi.start()?;
     info!("Wi-Fi started");
 
