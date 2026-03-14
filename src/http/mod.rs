@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::types::MqttConfig;
 use crate::config::types::WifiConfig;
 use crate::error::AppError;
+use crate::runtime::RuntimeSignals;
 use crate::storage::nvs::ConfigStore;
 use crate::wifi::ScannedNetwork;
 
@@ -291,7 +292,10 @@ impl ProvisioningController {
     }
 }
 
-pub fn start_server(store: ConfigStore) -> Result<EspHttpServer<'static>, AppError> {
+pub fn start_server(
+    store: ConfigStore,
+    runtime_signals: RuntimeSignals,
+) -> Result<EspHttpServer<'static>, AppError> {
     let mut server = EspHttpServer::new(&server_config())?;
     let store = Arc::new(Mutex::new(store));
 
@@ -307,11 +311,13 @@ pub fn start_server(store: ConfigStore) -> Result<EspHttpServer<'static>, AppErr
 
     {
         let store = store.clone();
+        let runtime_signals = runtime_signals.clone();
         server.fn_handler::<AppError, _>("/api/reset-configuration", Method::Post, move |req| {
             store
                 .lock()
                 .map_err(|_| AppError::Message("Config store lock poisoned".into()))?
                 .clear_all()?;
+            runtime_signals.mark_restart_pending();
 
             write_json(
                 req,
@@ -341,6 +347,7 @@ pub fn start_server(store: ConfigStore) -> Result<EspHttpServer<'static>, AppErr
 
 pub fn start_captive_portal_server(
     controller: ProvisioningController,
+    runtime_signals: RuntimeSignals,
 ) -> Result<EspHttpServer<'static>, AppError> {
     let mut server = EspHttpServer::new(&server_config())?;
 
@@ -480,9 +487,11 @@ pub fn start_captive_portal_server(
 
     {
         let controller = controller.clone();
+        let runtime_signals = runtime_signals.clone();
         server.fn_handler("/api/save-mqtt", Method::Post, move |mut req| {
             let payload: MqttPayload = read_json_body(&mut req)?;
             let message = controller.save_tested_mqtt(payload)?;
+            runtime_signals.mark_restart_pending();
 
             thread::spawn(|| {
                 thread::sleep(Duration::from_secs(3));
