@@ -305,6 +305,8 @@ impl AppController {
                 module_manager,
             )?;
 
+            module_manager.poll(mqtt.as_mut(), contract.topics())?;
+
             while let Ok(action) = command_rx.try_recv() {
                 if let Some(mqtt) = mqtt.as_mut() {
                     self.handle_runtime_command(mqtt, contract, resources, module_manager, action)?;

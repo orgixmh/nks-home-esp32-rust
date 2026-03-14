@@ -5,8 +5,8 @@ use serde::Serialize;
 
 use crate::board::{BoardProfile, BoardProfileSnapshot};
 use crate::config::types::{
-    ModuleInstanceConfig, ModuleRole, ModuleSettings, ModuleType, PinBindingConfig,
-    ResourceConfig, ResourceUsage,
+    ModuleInstanceConfig, ModuleRole, ModuleSettings, ModuleType, PinBindingConfig, ResourceConfig,
+    ResourceUsage,
 };
 use crate::error::AppError;
 
