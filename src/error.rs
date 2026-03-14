@@ -1,5 +1,5 @@
-use std::fmt::{Display, Formatter};
 use esp_idf_svc::sys::EspError;
+use std::fmt::{Display, Formatter};
 
 #[derive(Debug)]
 pub enum AppError {

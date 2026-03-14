@@ -1,0 +1,6 @@
+model = "gpt-5.4"
+
+[shell_environment_policy]
+inherit = "all"
+
+web_search = "live"

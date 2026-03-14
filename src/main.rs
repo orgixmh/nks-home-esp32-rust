@@ -8,9 +8,9 @@ mod wifi;
 use log::info;
 
 use crate::app::{detect_boot_mode, BootMode};
+use crate::config::types::{DeviceConfig, MqttConfig, WifiConfig};
 use crate::error::AppError;
 use crate::storage::nvs::ConfigStore;
-use crate::config::types::{DeviceConfig, WifiConfig, MqttConfig};
 
 fn main() -> Result<(), AppError> {
     esp_idf_svc::sys::link_patches();
@@ -28,7 +28,6 @@ fn main() -> Result<(), AppError> {
             info!("Wi-Fi SSID: {}", cfg.wifi.ssid);
             info!("MQTT host: {}:{}", cfg.mqtt.host, cfg.mqtt.port);
 
-            // next step:
             let _wifi = wifi::connect_sta(&cfg.wifi)?;
             // mqtt::connect(&cfg.mqtt)?;
         }

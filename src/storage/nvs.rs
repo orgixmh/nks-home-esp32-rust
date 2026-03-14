@@ -1,6 +1,6 @@
-use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use crate::config::types::{DeviceConfig, MqttConfig, WifiConfig};
 use crate::error::AppError;
+use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 
 const WIFI_NS: &str = "wifi";
 const MQTT_NS: &str = "mqtt";
@@ -58,14 +58,30 @@ impl ConfigStore {
         let mqtt_client_id = get_str(&mqtt_nvs, KEY_MQTT_CLIENT_ID)?;
         let mqtt_base_topic = get_str(&mqtt_nvs, KEY_MQTT_BASE_TOPIC)?;
 
-        let Some(wifi_ssid) = wifi_ssid else { return Ok(None) };
-        let Some(wifi_pass) = wifi_pass else { return Ok(None) };
-        let Some(mqtt_host) = mqtt_host else { return Ok(None) };
-        let Some(mqtt_port) = mqtt_port else { return Ok(None) };
-        let Some(mqtt_user) = mqtt_user else { return Ok(None) };
-        let Some(mqtt_pass) = mqtt_pass else { return Ok(None) };
-        let Some(mqtt_client_id) = mqtt_client_id else { return Ok(None) };
-        let Some(mqtt_base_topic) = mqtt_base_topic else { return Ok(None) };
+        let Some(wifi_ssid) = wifi_ssid else {
+            return Ok(None);
+        };
+        let Some(wifi_pass) = wifi_pass else {
+            return Ok(None);
+        };
+        let Some(mqtt_host) = mqtt_host else {
+            return Ok(None);
+        };
+        let Some(mqtt_port) = mqtt_port else {
+            return Ok(None);
+        };
+        let Some(mqtt_user) = mqtt_user else {
+            return Ok(None);
+        };
+        let Some(mqtt_pass) = mqtt_pass else {
+            return Ok(None);
+        };
+        let Some(mqtt_client_id) = mqtt_client_id else {
+            return Ok(None);
+        };
+        let Some(mqtt_base_topic) = mqtt_base_topic else {
+            return Ok(None);
+        };
 
         let cfg = DeviceConfig {
             wifi: WifiConfig {
