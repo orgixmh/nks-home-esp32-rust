@@ -1,10 +1,13 @@
+pub mod contract;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use esp_idf_svc::mqtt::client::{
-    EspMqttClient, EventPayload, MessageId, MqttClientConfiguration, QoS,
+    EspMqttClient, EventPayload, LwtConfiguration, MessageId, MqttClientConfiguration, QoS,
 };
 use log::{info, warn};
+use serde::Serialize;
 
 use crate::config::types::MqttConfig;
 use crate::error::AppError;
@@ -32,8 +35,23 @@ pub struct MqttMessage {
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MqttLastWill {
+    pub topic: String,
+    pub payload: Vec<u8>,
+    pub qos: QoS,
+    pub retain: bool,
+}
+
 impl MqttManager {
     pub fn connect(config: &MqttConfig) -> Result<Self, AppError> {
+        Self::connect_with_last_will(config, None)
+    }
+
+    pub fn connect_with_last_will(
+        config: &MqttConfig,
+        last_will: Option<&MqttLastWill>,
+    ) -> Result<Self, AppError> {
         let state = Arc::new(Mutex::new(MqttState {
             connected: false,
             last_error: None,
@@ -41,6 +59,12 @@ impl MqttManager {
         }));
         let event_state = state.clone();
         let broker_url = broker_url(config);
+        let lwt = last_will.map(|last_will| LwtConfiguration {
+            topic: &last_will.topic,
+            payload: &last_will.payload,
+            qos: last_will.qos,
+            retain: last_will.retain,
+        });
 
         let client = EspMqttClient::new_cb(
             &broker_url,
@@ -48,6 +72,7 @@ impl MqttManager {
                 client_id: Some(&config.client_id),
                 username: optional_str(&config.username),
                 password: optional_str(&config.password),
+                lwt,
                 keep_alive_interval: Some(Duration::from_secs(30)),
                 reconnect_timeout: Some(Duration::from_secs(10)),
                 network_timeout: Duration::from_secs(10),
@@ -128,6 +153,17 @@ impl MqttManager {
         retain: bool,
     ) -> Result<MessageId, AppError> {
         Ok(self.client.publish(topic, qos, retain, payload)?)
+    }
+
+    pub fn publish_json<T: Serialize>(
+        &mut self,
+        topic: &str,
+        payload: &T,
+        qos: QoS,
+        retain: bool,
+    ) -> Result<MessageId, AppError> {
+        let serialized = serde_json::to_vec(payload)?;
+        self.publish(topic, &serialized, qos, retain)
     }
 
     pub fn subscribe<F>(

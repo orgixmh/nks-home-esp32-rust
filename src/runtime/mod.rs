@@ -1,13 +1,16 @@
+mod indicator;
+
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::mqtt::client::QoS;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use log::{error, info};
+use log::{error, info, warn};
 
 use crate::app::{detect_boot_mode, BootMode};
 use crate::board::BoardProfile;
@@ -15,6 +18,8 @@ use crate::error::AppError;
 use crate::gpio::GpioManager;
 use crate::http::{self, ProvisioningController};
 use crate::mqtt;
+use crate::mqtt::contract::{ConfigOperationResultPayload, ContractAction, MqttContract};
+use crate::runtime::indicator::{ErrorKind, IndicatorMode, LedIndicator};
 use crate::storage::nvs::ConfigStore;
 use crate::wifi;
 
@@ -47,10 +52,15 @@ impl RuntimeSignals {
 
 pub struct AppController {
     state: AppState,
+    error_kind: ErrorKind,
+    recovering_from_error: bool,
     signals: RuntimeSignals,
     nvs: EspDefaultNvsPartition,
     store: ConfigStore,
     gpio_manager: GpioManager,
+    led_indicator: LedIndicator,
+    wifi_retry_at: Option<Instant>,
+    mqtt_retry_at: Option<Instant>,
 }
 
 impl AppController {
@@ -59,15 +69,21 @@ impl AppController {
 
         Self {
             state: AppState::Booting,
+            error_kind: ErrorKind::Unknown,
+            recovering_from_error: false,
             signals: RuntimeSignals::default(),
             nvs,
             store,
             gpio_manager: GpioManager::new(BoardProfile::esp32_devkit_v1()),
+            led_indicator: LedIndicator::new_onboard().expect("failed to initialize onboard LED"),
+            wifi_retry_at: None,
+            mqtt_retry_at: None,
         }
     }
 
     pub fn run(mut self) -> Result<(), AppError> {
         self.transition_to(AppState::Booting);
+        self.led_indicator.set_mode(IndicatorMode::Off);
         self.clear_legacy_demo_config()?;
         self.initialize_resource_runtime()?;
 
@@ -122,35 +138,36 @@ impl AppController {
 
             info!("Wi-Fi SSID: {}", cfg.wifi.ssid);
             info!("MQTT host: {}:{}", cfg.mqtt.host, cfg.mqtt.port);
+            let mut resources = self.store.load_resources()?;
+            let contract = MqttContract::new(&cfg.mqtt, BoardProfile::esp32_devkit_v1());
+            let (command_tx, command_rx) = mpsc::channel();
 
             self.transition_to(AppState::WifiConnecting);
-            let _wifi =
-                wifi::connect_sta(peripherals.modem, sys_loop, self.nvs.clone(), &cfg.wifi)?;
+            let mut wifi =
+                wifi::create_sta(peripherals.modem, sys_loop, self.nvs.clone(), &cfg.wifi)?;
+            self.connect_wifi_with_retry(&mut wifi)?;
 
             self.transition_to(AppState::MqttConnecting);
-            let mut _mqtt = mqtt::MqttManager::connect(&cfg.mqtt)?;
-            let mqtt_status_topic = format!("{}/status", cfg.mqtt.base_topic);
-            let mqtt_command_topic = format!("{}/cmd/#", cfg.mqtt.base_topic);
-
-            _mqtt.wait_until_connected(Duration::from_secs(15))?;
-            _mqtt.subscribe(&mqtt_command_topic, QoS::AtMostOnce, |message| {
-                info!(
-                    "MQTT message on {}: {}",
-                    message.topic,
-                    String::from_utf8_lossy(&message.payload)
-                );
-            })?;
-            _mqtt.publish(
-                &mqtt_status_topic,
-                br#"{"status":"online"}"#,
-                QoS::AtLeastOnce,
-                false,
-            )?;
+            let mut mqtt = Some(self.establish_mqtt_session(
+                &cfg.mqtt,
+                &contract,
+                &command_tx,
+                &wifi,
+                &resources,
+            )?);
 
             let _http_server = http::start_server(self.store_partition(), self.signals.clone())?;
             self.transition_to(AppState::Operational);
 
-            self.idle_forever()
+            self.run_operational_loop(
+                &mut wifi,
+                &mut mqtt,
+                &cfg.mqtt,
+                &contract,
+                &command_tx,
+                &command_rx,
+                &mut resources,
+            )
         })();
 
         self.finish_result(result)
@@ -220,6 +237,8 @@ impl AppController {
 
     fn finish_result(&mut self, result: Result<(), AppError>) -> Result<(), AppError> {
         if let Err(error) = &result {
+            let error_kind = self.error_kind_for_current_state();
+            self.error_kind = error_kind;
             self.transition_to(AppState::Degraded);
             error!("Application runtime degraded: {error}");
         }
@@ -235,6 +254,10 @@ impl AppController {
         if self.state != next {
             info!("App state transition: {:?} -> {:?}", self.state, next);
             self.state = next;
+            if next == AppState::Operational {
+                self.recovering_from_error = false;
+            }
+            self.update_indicator_for_state();
         }
     }
 
@@ -243,9 +266,304 @@ impl AppController {
             thread::sleep(Duration::from_secs(60));
         }
     }
+
+    fn run_operational_loop(
+        &mut self,
+        wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
+        mqtt: &mut Option<mqtt::MqttManager>,
+        mqtt_config: &crate::config::types::MqttConfig,
+        contract: &MqttContract,
+        command_tx: &mpsc::Sender<ContractAction>,
+        command_rx: &mpsc::Receiver<ContractAction>,
+        resources: &mut crate::config::types::ResourceConfig,
+    ) -> Result<(), AppError> {
+        loop {
+            self.check_runtime_connectivity(
+                wifi,
+                mqtt,
+                mqtt_config,
+                contract,
+                command_tx,
+                resources,
+            )?;
+
+            while let Ok(action) = command_rx.try_recv() {
+                if let Some(mqtt) = mqtt.as_mut() {
+                    self.handle_contract_action(mqtt, contract, resources, action)?;
+                }
+            }
+
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    fn check_runtime_connectivity(
+        &mut self,
+        wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
+        mqtt: &mut Option<mqtt::MqttManager>,
+        mqtt_config: &crate::config::types::MqttConfig,
+        contract: &MqttContract,
+        command_tx: &mpsc::Sender<ContractAction>,
+        resources: &crate::config::types::ResourceConfig,
+    ) -> Result<(), AppError> {
+        if !wifi.is_connected()? || !wifi.is_up()? {
+            self.error_kind = ErrorKind::Wifi;
+            self.recovering_from_error = true;
+            self.transition_to(AppState::Degraded);
+            let now = Instant::now();
+            let retry_at = *self
+                .wifi_retry_at
+                .get_or_insert_with(|| now + Duration::from_secs(2));
+
+            if now < retry_at {
+                return Ok(());
+            }
+
+            // Stop MQTT retries while the STA link is down.
+            let _ = mqtt.take();
+            self.transition_to(AppState::WifiConnecting);
+
+            if let Err(error) = wifi.connect().and_then(|_| wifi.wait_netif_up()) {
+                warn!("Wi-Fi reconnect attempt failed: {error}");
+                self.error_kind = ErrorKind::Wifi;
+                self.transition_to(AppState::Degraded);
+                self.wifi_retry_at = Some(Instant::now() + Duration::from_secs(2));
+                return Ok(());
+            }
+
+            self.wifi_retry_at = None;
+            self.mqtt_retry_at = None;
+
+            self.transition_to(AppState::MqttConnecting);
+            match self.establish_mqtt_session(mqtt_config, contract, command_tx, wifi, resources) {
+                Ok(session) => {
+                    *mqtt = Some(session);
+                    self.transition_to(AppState::Operational);
+                }
+                Err(error) => {
+                    warn!("MQTT reconnect after Wi-Fi recovery failed: {error}");
+                    self.error_kind = classify_wifi_first(wifi)?;
+                    self.recovering_from_error = true;
+                    self.transition_to(AppState::Degraded);
+                    self.mqtt_retry_at = Some(Instant::now() + Duration::from_secs(2));
+                }
+            }
+
+            return Ok(());
+        }
+
+        if mqtt
+            .as_ref()
+            .is_some_and(|mqtt| mqtt.is_connected().ok() == Some(false))
+        {
+            self.error_kind = ErrorKind::Mqtt;
+            self.recovering_from_error = true;
+            self.transition_to(AppState::Degraded);
+            let now = Instant::now();
+            let retry_at = *self
+                .mqtt_retry_at
+                .get_or_insert_with(|| now + Duration::from_secs(2));
+
+            if now < retry_at {
+                return Ok(());
+            }
+
+            self.transition_to(AppState::MqttConnecting);
+
+            let Some(active_mqtt) = mqtt.as_mut() else {
+                return Ok(());
+            };
+
+            if let Err(error) = active_mqtt.wait_until_connected(Duration::from_secs(15)) {
+                self.error_kind = classify_wifi_first(wifi)?;
+                warn!("MQTT reconnect attempt failed: {error}");
+                self.transition_to(AppState::Degraded);
+                self.mqtt_retry_at = Some(Instant::now() + Duration::from_secs(2));
+                return Ok(());
+            }
+            self.mqtt_retry_at = None;
+            contract.publish_birth(active_mqtt, &self.gpio_manager.snapshot(resources))?;
+            self.transition_to(AppState::Operational);
+        }
+
+        Ok(())
+    }
+
+    fn handle_contract_action(
+        &mut self,
+        mqtt: &mut mqtt::MqttManager,
+        contract: &MqttContract,
+        resources: &mut crate::config::types::ResourceConfig,
+        action: ContractAction,
+    ) -> Result<(), AppError> {
+        match action {
+            ContractAction::GetConfig { request_id } => {
+                let snapshot = self.gpio_manager.snapshot(resources);
+                contract.publish_birth(mqtt, &snapshot)?;
+                contract.publish_config_result(
+                    mqtt,
+                    &MqttContract::ok_result(
+                        "get_config",
+                        request_id,
+                        "Published current board and resource configuration.",
+                    ),
+                )?;
+            }
+            ContractAction::ValidateResources {
+                request_id,
+                resources: proposed_resources,
+            } => {
+                let result = match self.gpio_manager.validate_config(&proposed_resources) {
+                    Ok(()) => MqttContract::ok_result(
+                        "validate_resources",
+                        request_id,
+                        "Resource configuration is valid.",
+                    ),
+                    Err(error) => MqttContract::error_result(
+                        "validate_resources",
+                        request_id,
+                        error.to_string(),
+                    ),
+                };
+
+                contract.publish_config_result(mqtt, &result)?;
+            }
+            ContractAction::SetResources {
+                request_id,
+                resources: proposed_resources,
+            } => match self.gpio_manager.validate_config(&proposed_resources) {
+                Ok(()) => {
+                    self.store.save_resources(&proposed_resources)?;
+                    *resources = proposed_resources;
+
+                    let snapshot = self.gpio_manager.snapshot(resources);
+                    contract.publish_resources_snapshot(mqtt, &snapshot)?;
+                    contract.publish_config_result(
+                        mqtt,
+                        &MqttContract::ok_result(
+                            "set_resources",
+                            request_id,
+                            "Resource configuration saved successfully.",
+                        ),
+                    )?;
+                }
+                Err(error) => {
+                    contract.publish_config_result(
+                        mqtt,
+                        &MqttContract::error_result("set_resources", request_id, error.to_string()),
+                    )?;
+                }
+            },
+            ContractAction::PublishResult(payload) => {
+                self.publish_contract_result(mqtt, contract, payload)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn publish_contract_result(
+        &mut self,
+        mqtt: &mut mqtt::MqttManager,
+        contract: &MqttContract,
+        payload: ConfigOperationResultPayload,
+    ) -> Result<(), AppError> {
+        contract.publish_config_result(mqtt, &payload)
+    }
+
+    fn connect_wifi_with_retry(
+        &mut self,
+        wifi: &mut esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
+    ) -> Result<(), AppError> {
+        loop {
+            match wifi::connect_sta_existing(wifi) {
+                Ok(()) => {
+                    self.wifi_retry_at = None;
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!("Initial Wi-Fi connect attempt failed: {error}");
+                    self.error_kind = ErrorKind::Wifi;
+                    self.transition_to(AppState::Degraded);
+                    thread::sleep(Duration::from_secs(2));
+                    self.transition_to(AppState::WifiConnecting);
+                }
+            }
+        }
+    }
+
+    fn update_indicator_for_state(&self) {
+        let mode = if self.recovering_from_error
+            && matches!(
+                self.state,
+                AppState::Degraded | AppState::WifiConnecting | AppState::MqttConnecting
+            ) {
+            IndicatorMode::Error(self.error_kind)
+        } else {
+            match self.state {
+                AppState::Provisioning => IndicatorMode::Provisioning,
+                AppState::NormalStartup | AppState::WifiConnecting | AppState::MqttConnecting => {
+                    IndicatorMode::NormalStartup
+                }
+                AppState::Operational => IndicatorMode::Operational,
+                AppState::Degraded => IndicatorMode::Error(self.error_kind),
+                AppState::Booting | AppState::RestartPending => IndicatorMode::Off,
+            }
+        };
+
+        self.led_indicator.set_mode(mode);
+    }
+
+    fn error_kind_for_current_state(&self) -> ErrorKind {
+        match self.state {
+            AppState::WifiConnecting => ErrorKind::Wifi,
+            AppState::MqttConnecting => ErrorKind::Mqtt,
+            _ => ErrorKind::Unknown,
+        }
+    }
+
+    fn establish_mqtt_session(
+        &mut self,
+        mqtt_config: &crate::config::types::MqttConfig,
+        contract: &MqttContract,
+        command_tx: &mpsc::Sender<ContractAction>,
+        wifi: &esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
+        resources: &crate::config::types::ResourceConfig,
+    ) -> Result<mqtt::MqttManager, AppError> {
+        let last_will = contract.last_will()?;
+        let command_topic = contract.topics().command_wildcard();
+        let mut mqtt = mqtt::MqttManager::connect_with_last_will(mqtt_config, Some(&last_will))?;
+
+        if let Err(error) = mqtt.wait_until_connected(Duration::from_secs(15)) {
+            self.error_kind = classify_wifi_first(wifi)?;
+            return Err(error);
+        }
+
+        mqtt.subscribe(command_topic.as_str(), QoS::AtMostOnce, {
+            let command_tx = command_tx.clone();
+            let contract = contract.clone();
+
+            move |message| {
+                let _ = command_tx.send(contract.parse_action(message));
+            }
+        })?;
+        contract.publish_birth(&mut mqtt, &self.gpio_manager.snapshot(resources))?;
+
+        Ok(mqtt)
+    }
 }
 
 fn take_peripherals() -> Result<Peripherals, AppError> {
     Peripherals::take()
         .map_err(|e| AppError::Message(format!("Failed to take ESP peripherals: {e:?}")))
+}
+
+fn classify_wifi_first(
+    wifi: &esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
+) -> Result<ErrorKind, AppError> {
+    if !wifi.is_connected()? || !wifi.is_up()? {
+        Ok(ErrorKind::Wifi)
+    } else {
+        Ok(ErrorKind::Mqtt)
+    }
 }

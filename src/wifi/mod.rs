@@ -20,6 +20,17 @@ pub fn connect_sta(
     nvs: EspDefaultNvsPartition,
     cfg: &WifiConfig,
 ) -> Result<BlockingWifi<EspWifi<'static>>, AppError> {
+    let mut wifi = create_sta(modem, sys_loop, nvs, cfg)?;
+    connect_sta_existing(&mut wifi)?;
+    Ok(wifi)
+}
+
+pub fn create_sta(
+    modem: Modem,
+    sys_loop: EspSystemEventLoop,
+    nvs: EspDefaultNvsPartition,
+    cfg: &WifiConfig,
+) -> Result<BlockingWifi<EspWifi<'static>>, AppError> {
     info!("Initializing Wi-Fi station mode");
 
     let auth_method = if cfg.password.is_empty() {
@@ -51,6 +62,10 @@ pub fn connect_sta(
     wifi.start()?;
     info!("Wi-Fi started");
 
+    Ok(wifi)
+}
+
+pub fn connect_sta_existing(wifi: &mut BlockingWifi<EspWifi<'static>>) -> Result<(), AppError> {
     wifi.connect()?;
     info!("Wi-Fi connected");
 
@@ -60,7 +75,7 @@ pub fn connect_sta(
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
     info!("Wi-Fi DHCP info: {ip_info:?}");
 
-    Ok(wifi)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
