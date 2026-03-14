@@ -10,7 +10,9 @@ use crate::error::AppError;
 pub fn connect_sta(cfg: &WifiConfig) -> Result<Box<EspWifi<'static>>, AppError> {
     info!("Initializing Wi-Fi station mode");
 
-    let peripherals = Peripherals::take()?;
+    let peripherals = Peripherals::take().ok_or_else(|| {
+        AppError::Message("Failed to take ESP peripherals for Wi-Fi".to_string())
+    })?;
 
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
@@ -41,11 +43,7 @@ pub fn connect_sta(cfg: &WifiConfig) -> Result<Box<EspWifi<'static>>, AppError> 
     if let Err(e) = (|| -> Result<(), AppError> {
         wifi.start()?;
         wifi.connect()?;
-        if !wifi.is_connected()? {
-            return Err(AppError::Message(
-                "Wi-Fi reported disconnected state after connect".to_string(),
-            ));
-        }
+        wifi.wait_netif_up()?;
         Ok(())
     })() {
         error!("Wi-Fi connection failed for SSID '{}': {}", cfg.ssid, e);
