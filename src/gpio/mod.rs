@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::board::{BoardProfile, BoardProfileSnapshot};
 use crate::config::types::{
-    ModuleInstanceConfig, ModuleRole, ModuleType, PinBindingConfig, ResourceBindingTarget,
+    ModuleInstanceConfig, ModuleRole, ModuleSettings, ModuleType, PinBindingConfig,
     ResourceConfig, ResourceUsage,
 };
 use crate::error::AppError;
@@ -21,6 +21,7 @@ pub struct ModuleInstanceSnapshot {
     pub id: String,
     pub module_type: ModuleType,
     pub display_name: Option<String>,
+    pub settings: ModuleSettings,
     pub bindings: Vec<PinBindingSnapshot>,
 }
 
@@ -142,6 +143,7 @@ impl GpioManager {
                     id: instance.id.clone(),
                     module_type: instance.module_type,
                     display_name: instance.display_name.clone(),
+                    settings: instance.settings.clone(),
                     bindings: instance
                         .bindings
                         .iter()

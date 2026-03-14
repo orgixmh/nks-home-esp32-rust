@@ -17,6 +17,7 @@ use crate::board::BoardProfile;
 use crate::error::AppError;
 use crate::gpio::GpioManager;
 use crate::http::{self, ProvisioningController};
+use crate::modules::{ModuleCommand, ModuleManager};
 use crate::mqtt;
 use crate::mqtt::contract::{ConfigOperationResultPayload, ContractAction, MqttContract};
 use crate::runtime::indicator::{ErrorKind, IndicatorMode, LedIndicator};
@@ -61,6 +62,11 @@ pub struct AppController {
     led_indicator: LedIndicator,
     wifi_retry_at: Option<Instant>,
     mqtt_retry_at: Option<Instant>,
+}
+
+enum RuntimeCommand {
+    Contract(ContractAction),
+    Module(ModuleCommand),
 }
 
 impl AppController {
@@ -147,13 +153,22 @@ impl AppController {
                 wifi::create_sta(peripherals.modem, sys_loop, self.nvs.clone(), &cfg.wifi)?;
             self.connect_wifi_with_retry(&mut wifi)?;
 
+            let mut module_manager = match self.load_runtime_modules(&resources) {
+                Ok(manager) => manager,
+                Err(error) => {
+                    error!("Failed to initialize runtime modules: {error}");
+                    ModuleManager::empty()
+                }
+            };
+
             self.transition_to(AppState::MqttConnecting);
             let mut mqtt = Some(self.establish_mqtt_session(
                 &cfg.mqtt,
                 &contract,
+                &resources,
+                &mut module_manager,
                 &command_tx,
                 &wifi,
-                &resources,
             )?);
 
             let _http_server = http::start_server(self.store_partition(), self.signals.clone())?;
@@ -167,6 +182,7 @@ impl AppController {
                 &command_tx,
                 &command_rx,
                 &mut resources,
+                &mut module_manager,
             )
         })();
 
@@ -273,9 +289,10 @@ impl AppController {
         mqtt: &mut Option<mqtt::MqttManager>,
         mqtt_config: &crate::config::types::MqttConfig,
         contract: &MqttContract,
-        command_tx: &mpsc::Sender<ContractAction>,
-        command_rx: &mpsc::Receiver<ContractAction>,
+        command_tx: &mpsc::Sender<RuntimeCommand>,
+        command_rx: &mpsc::Receiver<RuntimeCommand>,
         resources: &mut crate::config::types::ResourceConfig,
+        module_manager: &mut ModuleManager,
     ) -> Result<(), AppError> {
         loop {
             self.check_runtime_connectivity(
@@ -285,11 +302,12 @@ impl AppController {
                 contract,
                 command_tx,
                 resources,
+                module_manager,
             )?;
 
             while let Ok(action) = command_rx.try_recv() {
                 if let Some(mqtt) = mqtt.as_mut() {
-                    self.handle_contract_action(mqtt, contract, resources, action)?;
+                    self.handle_runtime_command(mqtt, contract, resources, module_manager, action)?;
                 }
             }
 
@@ -303,8 +321,9 @@ impl AppController {
         mqtt: &mut Option<mqtt::MqttManager>,
         mqtt_config: &crate::config::types::MqttConfig,
         contract: &MqttContract,
-        command_tx: &mpsc::Sender<ContractAction>,
+        command_tx: &mpsc::Sender<RuntimeCommand>,
         resources: &crate::config::types::ResourceConfig,
+        module_manager: &mut ModuleManager,
     ) -> Result<(), AppError> {
         if !wifi.is_connected()? || !wifi.is_up()? {
             self.error_kind = ErrorKind::Wifi;
@@ -335,7 +354,14 @@ impl AppController {
             self.mqtt_retry_at = None;
 
             self.transition_to(AppState::MqttConnecting);
-            match self.establish_mqtt_session(mqtt_config, contract, command_tx, wifi, resources) {
+            match self.establish_mqtt_session(
+                mqtt_config,
+                contract,
+                resources,
+                module_manager,
+                command_tx,
+                wifi,
+            ) {
                 Ok(session) => {
                     *mqtt = Some(session);
                     self.transition_to(AppState::Operational);
@@ -383,10 +409,33 @@ impl AppController {
             }
             self.mqtt_retry_at = None;
             contract.publish_birth(active_mqtt, &self.gpio_manager.snapshot(resources))?;
+            module_manager.publish_initial_states(active_mqtt, contract.topics())?;
             self.transition_to(AppState::Operational);
         }
 
         Ok(())
+    }
+
+    fn handle_runtime_command(
+        &mut self,
+        mqtt: &mut mqtt::MqttManager,
+        contract: &MqttContract,
+        resources: &mut crate::config::types::ResourceConfig,
+        module_manager: &mut ModuleManager,
+        action: RuntimeCommand,
+    ) -> Result<(), AppError> {
+        match action {
+            RuntimeCommand::Contract(action) => {
+                self.handle_contract_action(mqtt, contract, resources, module_manager, action)
+            }
+            RuntimeCommand::Module(command) => {
+                if let Err(error) = module_manager.handle_command(mqtt, contract.topics(), command)
+                {
+                    warn!("Module command failed: {error}");
+                }
+                Ok(())
+            }
+        }
     }
 
     fn handle_contract_action(
@@ -394,6 +443,7 @@ impl AppController {
         mqtt: &mut mqtt::MqttManager,
         contract: &MqttContract,
         resources: &mut crate::config::types::ResourceConfig,
+        module_manager: &mut ModuleManager,
         action: ContractAction,
     ) -> Result<(), AppError> {
         match action {
@@ -433,11 +483,14 @@ impl AppController {
                 resources: proposed_resources,
             } => match self.gpio_manager.validate_config(&proposed_resources) {
                 Ok(()) => {
+                    let reloaded_modules = self.load_runtime_modules(&proposed_resources)?;
                     self.store.save_resources(&proposed_resources)?;
                     *resources = proposed_resources;
+                    *module_manager = reloaded_modules;
 
                     let snapshot = self.gpio_manager.snapshot(resources);
                     contract.publish_resources_snapshot(mqtt, &snapshot)?;
+                    module_manager.publish_initial_states(mqtt, contract.topics())?;
                     contract.publish_config_result(
                         mqtt,
                         &MqttContract::ok_result(
@@ -469,6 +522,16 @@ impl AppController {
         payload: ConfigOperationResultPayload,
     ) -> Result<(), AppError> {
         contract.publish_config_result(mqtt, &payload)
+    }
+
+    fn load_runtime_modules(
+        &mut self,
+        resources: &crate::config::types::ResourceConfig,
+    ) -> Result<ModuleManager, AppError> {
+        let mut gpio_manager = GpioManager::new(BoardProfile::esp32_devkit_v1());
+        let module_manager = ModuleManager::load(resources, &mut gpio_manager)?;
+        self.gpio_manager = gpio_manager;
+        Ok(module_manager)
     }
 
     fn connect_wifi_with_retry(
@@ -526,12 +589,14 @@ impl AppController {
         &mut self,
         mqtt_config: &crate::config::types::MqttConfig,
         contract: &MqttContract,
-        command_tx: &mpsc::Sender<ContractAction>,
-        wifi: &esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
         resources: &crate::config::types::ResourceConfig,
+        module_manager: &mut ModuleManager,
+        command_tx: &mpsc::Sender<RuntimeCommand>,
+        wifi: &esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
     ) -> Result<mqtt::MqttManager, AppError> {
         let last_will = contract.last_will()?;
         let command_topic = contract.topics().command_wildcard();
+        let module_command_topic = contract.topics().module_command_wildcard();
         let mut mqtt = mqtt::MqttManager::connect_with_last_will(mqtt_config, Some(&last_will))?;
 
         if let Err(error) = mqtt.wait_until_connected(Duration::from_secs(15)) {
@@ -544,10 +609,24 @@ impl AppController {
             let contract = contract.clone();
 
             move |message| {
-                let _ = command_tx.send(contract.parse_action(message));
+                let _ = command_tx.send(RuntimeCommand::Contract(contract.parse_action(message)));
+            }
+        })?;
+        mqtt.subscribe(module_command_topic.as_str(), QoS::AtMostOnce, {
+            let command_tx = command_tx.clone();
+            let topics = contract.topics().clone();
+
+            move |message| {
+                if let Some(module_id) = topics.parse_module_command_topic(&message.topic) {
+                    let _ = command_tx.send(RuntimeCommand::Module(ModuleCommand {
+                        module_id,
+                        payload: message.payload.clone(),
+                    }));
+                }
             }
         })?;
         contract.publish_birth(&mut mqtt, &self.gpio_manager.snapshot(resources))?;
+        module_manager.publish_initial_states(&mut mqtt, contract.topics())?;
 
         Ok(mqtt)
     }

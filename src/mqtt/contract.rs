@@ -109,6 +109,34 @@ impl MqttTopics {
     pub fn command_wildcard(&self) -> String {
         format!("{}/cmd/#", self.base_topic)
     }
+
+    pub fn module_command(&self, module_id: &str) -> String {
+        format!("{}/mod/{module_id}/cmd", self.base_topic)
+    }
+
+    pub fn module_state(&self, module_id: &str) -> String {
+        format!("{}/mod/{module_id}/state", self.base_topic)
+    }
+
+    pub fn module_command_wildcard(&self) -> String {
+        format!("{}/mod/+/cmd", self.base_topic)
+    }
+
+    pub fn parse_module_command_topic(&self, topic: &str) -> Option<String> {
+        let prefix = format!("{}/mod/", self.base_topic);
+        let suffix = "/cmd";
+
+        if !topic.starts_with(&prefix) || !topic.ends_with(suffix) {
+            return None;
+        }
+
+        let module_id = &topic[prefix.len()..topic.len() - suffix.len()];
+        if module_id.is_empty() || module_id.contains('/') {
+            None
+        } else {
+            Some(module_id.to_string())
+        }
+    }
 }
 
 impl MqttContract {

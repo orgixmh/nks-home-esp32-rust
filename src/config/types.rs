@@ -36,12 +36,15 @@ pub struct ModuleInstanceConfig {
     pub module_type: ModuleType,
     pub display_name: Option<String>,
     pub bindings: Vec<PinBindingConfig>,
+    #[serde(default)]
+    pub settings: ModuleSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModuleType {
     Switch,
+    GpioOutput,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,6 +52,7 @@ pub enum ModuleType {
 pub enum ModuleRole {
     RelayOutput,
     WallTriggerInput,
+    Output,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -68,6 +72,19 @@ pub struct PinBindingConfig {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceBindingTarget {
     Gpio { pin: u8 },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModuleSettings {
+    #[serde(default)]
+    pub auto_off_ms: Option<u64>,
+    #[serde(default)]
+    pub external_on_triggers: Vec<ExternalModuleTriggerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalModuleTriggerConfig {
+    pub source_module_id: String,
 }
 
 impl DeviceConfig {
@@ -96,7 +113,8 @@ impl DeviceConfig {
 impl ModuleType {
     pub fn required_roles(self) -> &'static [ModuleRole] {
         match self {
-            Self::Switch => &[ModuleRole::RelayOutput, ModuleRole::WallTriggerInput],
+            Self::Switch => &[ModuleRole::RelayOutput],
+            Self::GpioOutput => &[ModuleRole::Output],
         }
     }
 }
@@ -106,6 +124,7 @@ impl ModuleRole {
         match self {
             Self::RelayOutput => ResourceUsage::Output,
             Self::WallTriggerInput => ResourceUsage::Input,
+            Self::Output => ResourceUsage::Output,
         }
     }
 }

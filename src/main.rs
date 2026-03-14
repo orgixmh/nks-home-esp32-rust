@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod gpio;
 mod http;
+mod modules;
 mod mqtt;
 mod runtime;
 mod storage;
