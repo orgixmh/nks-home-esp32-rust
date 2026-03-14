@@ -1,9 +1,10 @@
-use crate::config::types::{DeviceConfig, MqttConfig, WifiConfig};
+use crate::config::types::{DeviceConfig, MqttConfig, ResourceConfig, WifiConfig};
 use crate::error::AppError;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 
 const WIFI_NS: &str = "wifi";
 const MQTT_NS: &str = "mqtt";
+const RESOURCES_NS: &str = "resources";
 
 const KEY_WIFI_SSID: &str = "ssid";
 const KEY_WIFI_PASS: &str = "pass";
@@ -14,6 +15,7 @@ const KEY_MQTT_USER: &str = "user";
 const KEY_MQTT_PASS: &str = "pass";
 const KEY_MQTT_CLIENT_ID: &str = "cid";
 const KEY_MQTT_BASE_TOPIC: &str = "topic";
+const KEY_RESOURCE_CONFIG: &str = "bindings";
 
 pub struct ConfigStore {
     default_nvs: EspDefaultNvsPartition,
@@ -46,6 +48,8 @@ impl ConfigStore {
             mqtt_nvs.set_str(KEY_MQTT_BASE_TOPIC, &cfg.mqtt.base_topic)?;
         }
 
+        self.save_resources(&cfg.resources)?;
+
         Ok(())
     }
 
@@ -69,6 +73,14 @@ impl ConfigStore {
         Ok(())
     }
 
+    pub fn save_resources(&self, cfg: &ResourceConfig) -> Result<(), AppError> {
+        let mut resources_nvs = EspNvs::new(self.default_nvs.clone(), RESOURCES_NS, true)?;
+        let serialized = serde_json::to_string(cfg)?;
+        resources_nvs.set_str(KEY_RESOURCE_CONFIG, &serialized)?;
+
+        Ok(())
+    }
+
     pub fn load(&self) -> Result<Option<DeviceConfig>, AppError> {
         let wifi_nvs = EspNvs::new(self.default_nvs.clone(), WIFI_NS, true)?;
         let mqtt_nvs = EspNvs::new(self.default_nvs.clone(), MQTT_NS, true)?;
@@ -81,6 +93,7 @@ impl ConfigStore {
         let mqtt_pass = get_str(&mqtt_nvs, KEY_MQTT_PASS)?;
         let mqtt_client_id = get_str(&mqtt_nvs, KEY_MQTT_CLIENT_ID)?;
         let mqtt_base_topic = get_str(&mqtt_nvs, KEY_MQTT_BASE_TOPIC)?;
+        let resources = self.load_resources()?;
 
         let Some(wifi_ssid) = wifi_ssid else {
             return Ok(None);
@@ -120,9 +133,19 @@ impl ConfigStore {
                 client_id: mqtt_client_id,
                 base_topic: mqtt_base_topic,
             },
+            resources,
         };
 
         Ok(Some(cfg))
+    }
+
+    pub fn load_resources(&self) -> Result<ResourceConfig, AppError> {
+        let resources_nvs = EspNvs::new(self.default_nvs.clone(), RESOURCES_NS, true)?;
+        let Some(serialized) = get_large_str(&resources_nvs, KEY_RESOURCE_CONFIG)? else {
+            return Ok(ResourceConfig::default());
+        };
+
+        Ok(serde_json::from_str(&serialized)?)
     }
 
     pub fn clear_all(&self) -> Result<(), AppError> {
@@ -142,12 +165,27 @@ impl ConfigStore {
             let _ = mqtt_nvs.remove(KEY_MQTT_BASE_TOPIC);
         }
 
+        {
+            let mut resources_nvs = EspNvs::new(self.default_nvs.clone(), RESOURCES_NS, true)?;
+            let _ = resources_nvs.remove(KEY_RESOURCE_CONFIG);
+        }
+
         Ok(())
     }
 }
 
 fn get_str(nvs: &EspNvs<NvsDefault>, key: &str) -> Result<Option<String>, AppError> {
     let mut buf = [0_u8; 256];
+
+    match nvs.get_str(key, &mut buf) {
+        Ok(Some(value)) => Ok(Some(value.to_string())),
+        Ok(None) => Ok(None),
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+fn get_large_str(nvs: &EspNvs<NvsDefault>, key: &str) -> Result<Option<String>, AppError> {
+    let mut buf = [0_u8; 2048];
 
     match nvs.get_str(key, &mut buf) {
         Ok(Some(value)) => Ok(Some(value.to_string())),

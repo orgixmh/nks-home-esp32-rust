@@ -10,7 +10,9 @@ use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::{error, info};
 
 use crate::app::{detect_boot_mode, BootMode};
+use crate::board::BoardProfile;
 use crate::error::AppError;
+use crate::gpio::GpioManager;
 use crate::http::{self, ProvisioningController};
 use crate::mqtt;
 use crate::storage::nvs::ConfigStore;
@@ -48,6 +50,7 @@ pub struct AppController {
     signals: RuntimeSignals,
     nvs: EspDefaultNvsPartition,
     store: ConfigStore,
+    gpio_manager: GpioManager,
 }
 
 impl AppController {
@@ -59,12 +62,14 @@ impl AppController {
             signals: RuntimeSignals::default(),
             nvs,
             store,
+            gpio_manager: GpioManager::new(BoardProfile::esp32_devkit_v1()),
         }
     }
 
     pub fn run(mut self) -> Result<(), AppError> {
         self.transition_to(AppState::Booting);
         self.clear_legacy_demo_config()?;
+        self.initialize_resource_runtime()?;
 
         match detect_boot_mode(&self.store)? {
             BootMode::Normal => self.run_normal_mode(),
@@ -77,6 +82,25 @@ impl AppController {
             if cfg.is_legacy_demo_seed() {
                 info!("Removing legacy demo config from NVS");
                 self.store.clear_all()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn initialize_resource_runtime(&mut self) -> Result<(), AppError> {
+        let resources = self.store.load_resources()?;
+        match self.gpio_manager.validate_config(&resources) {
+            Ok(()) => {
+                let snapshot = self.gpio_manager.snapshot(&resources);
+                info!(
+                    "GPIO/resource runtime ready for board '{}' with {} module binding(s)",
+                    snapshot.board.name,
+                    snapshot.module_instances.len()
+                );
+            }
+            Err(error) => {
+                error!("Ignoring invalid stored GPIO/resource configuration: {error}");
             }
         }
 

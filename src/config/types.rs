@@ -1,10 +1,12 @@
-#[derive(Debug, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WifiConfig {
     pub ssid: String,
     pub password: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MqttConfig {
     pub host: String,
     pub port: u16,
@@ -14,10 +16,58 @@ pub struct MqttConfig {
     pub base_topic: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
     pub wifi: WifiConfig,
     pub mqtt: MqttConfig,
+    #[serde(default)]
+    pub resources: ResourceConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceConfig {
+    #[serde(default)]
+    pub module_instances: Vec<ModuleInstanceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleInstanceConfig {
+    pub id: String,
+    pub module_type: ModuleType,
+    pub display_name: Option<String>,
+    pub bindings: Vec<PinBindingConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleType {
+    Switch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleRole {
+    RelayOutput,
+    WallTriggerInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceUsage {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinBindingConfig {
+    pub role: ModuleRole,
+    pub target: ResourceBindingTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResourceBindingTarget {
+    Gpio { pin: u8 },
 }
 
 impl DeviceConfig {
@@ -40,5 +90,30 @@ impl DeviceConfig {
                 && self.mqtt.password == "testpassword"
                 && self.mqtt.client_id == "esp32-test-node"
                 && self.mqtt.base_topic == "nks/home/test-node")
+    }
+}
+
+impl ModuleType {
+    pub fn required_roles(self) -> &'static [ModuleRole] {
+        match self {
+            Self::Switch => &[ModuleRole::RelayOutput, ModuleRole::WallTriggerInput],
+        }
+    }
+}
+
+impl ModuleRole {
+    pub fn usage(self) -> ResourceUsage {
+        match self {
+            Self::RelayOutput => ResourceUsage::Output,
+            Self::WallTriggerInput => ResourceUsage::Input,
+        }
+    }
+}
+
+impl PinBindingConfig {
+    pub fn pin(&self) -> Result<u8, crate::error::AppError> {
+        match self.target {
+            ResourceBindingTarget::Gpio { pin } => Ok(pin),
+        }
     }
 }

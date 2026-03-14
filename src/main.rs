@@ -1,6 +1,8 @@
 mod app;
+mod board;
 mod config;
 mod error;
+mod gpio;
 mod http;
 mod mqtt;
 mod runtime;
