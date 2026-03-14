@@ -7,6 +7,7 @@ pub enum AppError {
     Message(String),
     Esp(EspError),
     EspIo(EspIOError),
+    Json(serde_json::Error),
     Utf8(std::string::FromUtf8Error),
     ParseInt(std::num::ParseIntError),
 }
@@ -17,6 +18,7 @@ impl Display for AppError {
             Self::Message(msg) => write!(f, "{msg}"),
             Self::Esp(e) => write!(f, "ESP error: {e}"),
             Self::EspIo(e) => write!(f, "ESP I/O error: {e}"),
+            Self::Json(e) => write!(f, "JSON error: {e}"),
             Self::Utf8(e) => write!(f, "UTF-8 error: {e}"),
             Self::ParseInt(e) => write!(f, "Parse int error: {e}"),
         }
@@ -34,6 +36,12 @@ impl From<EspError> for AppError {
 impl From<EspIOError> for AppError {
     fn from(value: EspIOError) -> Self {
         Self::EspIo(value)
+    }
+}
+
+impl From<serde_json::Error> for AppError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Json(value)
     }
 }
 

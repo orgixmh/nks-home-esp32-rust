@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>H0m3 Setup</title>
+  <link rel="stylesheet" href="/assets/provisioning.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <p class="eyebrow">H0m3</p>
+        <h1>Device Setup</h1>
+      </div>
+      <ol class="steps">
+        <li class="step is-active" data-step-indicator="0"><span>1</span><strong>Welcome</strong></li>
+        <li class="step" data-step-indicator="1"><span>2</span><strong>Wi-Fi</strong></li>
+        <li class="step" data-step-indicator="2"><span>3</span><strong>MQTT</strong></li>
+        <li class="step" data-step-indicator="3"><span>4</span><strong>Done</strong></li>
+      </ol>
+    </header>
+
+    <main class="panel">
+      <section class="view is-active" data-step="0">
+        <div class="card hero-card">
+          <p class="card-label">Welcome</p>
+          <h2>Set up H0m3 in just a few steps.</h2>
+          <p>First, connect H0m3 to your Wi-Fi network. Then add your broker details to finish setup.</p>
+          <div class="status-banner notice">
+            Your phone may switch networks for a few seconds while H0m3 checks your Wi-Fi. If that happens, reconnect to the H0m3 setup network and wait for the screen to update.
+          </div>
+          <div class="compact-list">
+            <article>
+              <strong>Step 1</strong>
+              <p>Select your home network and let H0m3 confirm the connection.</p>
+            </article>
+            <article>
+              <strong>Step 2</strong>
+              <p>Add broker details so H0m3 can complete setup.</p>
+            </article>
+          </div>
+          <div class="footer-actions">
+            <button class="button primary" data-next>Start</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" data-step="1">
+        <div class="card">
+          <p class="card-label">Wi-Fi</p>
+          <h2>Connect H0m3 to Wi-Fi.</h2>
+
+          <div class="network-box">
+            <div class="network-header">
+              <strong>Available Networks</strong>
+              <span id="scan-status">Waiting for scan data.</span>
+            </div>
+            <div class="network-list" id="network-list">
+              <p class="network-empty">Nearby networks will appear automatically when this step opens.</p>
+            </div>
+          </div>
+
+          <form id="wifi-form">
+            <div class="field-grid">
+              <label class="field">
+                <span>SSID</span>
+                <input id="wifi-ssid" name="ssid" autocomplete="off" placeholder="Home Wi-Fi" required>
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input id="wifi-password" name="password" type="password" placeholder="Wi-Fi password">
+              </label>
+            </div>
+
+            <div class="status-banner" id="wifi-status" hidden></div>
+
+            <div class="footer-actions">
+              <button class="button ghost" data-prev type="button">Back</button>
+              <button class="button primary" id="wifi-next-button" type="submit">Next</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="view" data-step="2">
+        <div class="card">
+          <p class="card-label">MQTT</p>
+          <h2>Connect H0m3 to your broker.</h2>
+          <p class="hint">Enter the broker details H0m3 should use after setup is complete.</p>
+
+          <form id="mqtt-form">
+            <div class="field-grid">
+              <label class="field">
+                <span>Protocol</span>
+                <select id="mqtt-protocol" name="protocol">
+                  <option value="nossl">No SSL</option>
+                  <option value="ssl">SSL</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Broker</span>
+                <input id="mqtt-broker" name="broker" autocomplete="off" placeholder="mqtt.example.local" required>
+              </label>
+              <label class="field">
+                <span>Username</span>
+                <input id="mqtt-username" name="username" autocomplete="off" placeholder="mqtt-user">
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input id="mqtt-password" name="password" type="password" placeholder="mqtt-password">
+              </label>
+            </div>
+
+            <div class="status-banner" id="mqtt-status" hidden></div>
+
+            <div class="footer-actions">
+              <button class="button ghost" data-prev type="button">Back</button>
+              <button class="button primary" id="mqtt-finish-button" type="submit">Finish</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="view" data-step="3">
+        <div class="card hero-card">
+          <p class="card-label">Congratulations</p>
+          <h2>H0m3 is ready.</h2>
+          <p>H0m3 will reboot to apply your settings. You can access it from your control panel once it comes back online.</p>
+          <div class="footer-actions">
+            <button class="button primary" id="finish-button" type="button">Finish</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="loading-overlay" id="loading-overlay" hidden>
+    <div class="loading-card">
+      <div class="spinner"></div>
+      <strong id="loading-message">Working...</strong>
+    </div>
+  </div>
+
+  <script src="/assets/provisioning.js"></script>
+</body>
+</html>

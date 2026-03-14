@@ -49,6 +49,26 @@ impl ConfigStore {
         Ok(())
     }
 
+    pub fn save_wifi(&self, cfg: &WifiConfig) -> Result<(), AppError> {
+        let mut wifi_nvs = EspNvs::new(self.default_nvs.clone(), WIFI_NS, true)?;
+        wifi_nvs.set_str(KEY_WIFI_SSID, &cfg.ssid)?;
+        wifi_nvs.set_str(KEY_WIFI_PASS, &cfg.password)?;
+
+        Ok(())
+    }
+
+    pub fn save_mqtt(&self, cfg: &MqttConfig) -> Result<(), AppError> {
+        let mut mqtt_nvs = EspNvs::new(self.default_nvs.clone(), MQTT_NS, true)?;
+        mqtt_nvs.set_str(KEY_MQTT_HOST, &cfg.host)?;
+        mqtt_nvs.set_u16(KEY_MQTT_PORT, cfg.port)?;
+        mqtt_nvs.set_str(KEY_MQTT_USER, &cfg.username)?;
+        mqtt_nvs.set_str(KEY_MQTT_PASS, &cfg.password)?;
+        mqtt_nvs.set_str(KEY_MQTT_CLIENT_ID, &cfg.client_id)?;
+        mqtt_nvs.set_str(KEY_MQTT_BASE_TOPIC, &cfg.base_topic)?;
+
+        Ok(())
+    }
+
     pub fn load(&self) -> Result<Option<DeviceConfig>, AppError> {
         let wifi_nvs = EspNvs::new(self.default_nvs.clone(), WIFI_NS, true)?;
         let mqtt_nvs = EspNvs::new(self.default_nvs.clone(), MQTT_NS, true)?;

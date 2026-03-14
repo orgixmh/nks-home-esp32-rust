@@ -963,6 +963,8 @@ dependencies = [
  "esp-idf-svc",
  "esp-idf-sys",
  "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

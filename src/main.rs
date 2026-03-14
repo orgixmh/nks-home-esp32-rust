@@ -14,7 +14,6 @@ use std::thread;
 use std::time::Duration;
 
 use crate::app::{detect_boot_mode, BootMode};
-use crate::config::types::{DeviceConfig, MqttConfig, WifiConfig};
 use crate::error::AppError;
 use crate::storage::nvs::ConfigStore;
 
@@ -26,12 +25,18 @@ fn main() -> Result<(), AppError> {
     let nvs = EspDefaultNvsPartition::take()?;
     let store = ConfigStore::with_partition(nvs.clone());
 
+    if let Some(cfg) = store.load()? {
+        if cfg.is_legacy_demo_seed() {
+            info!("Removing legacy demo config from NVS");
+            store.clear_all()?;
+        }
+    }
+
     match detect_boot_mode(&store)? {
         BootMode::Normal => {
             info!("Complete config found in NVS, entering normal mode");
 
             let cfg = store.load()?.expect("config disappeared unexpectedly");
-            drop(store);
             let peripherals = Peripherals::take()
                 .map_err(|e| AppError::Message(format!("Failed to take ESP peripherals: {e:?}")))?;
             let sys_loop = EspSystemEventLoop::take()?;
@@ -40,7 +45,7 @@ fn main() -> Result<(), AppError> {
             info!("MQTT host: {}:{}", cfg.mqtt.host, cfg.mqtt.port);
 
             let _wifi = wifi::connect_sta(peripherals.modem, sys_loop, nvs, &cfg.wifi)?;
-            let _http_server = http::start_server()?;
+            let _http_server = http::start_server(store)?;
             // mqtt::connect(&cfg.mqtt)?;
 
             loop {
@@ -49,24 +54,31 @@ fn main() -> Result<(), AppError> {
         }
         BootMode::Provisioning => {
             info!("No complete config found, entering provisioning mode");
+            let peripherals = Peripherals::take()
+                .map_err(|e| AppError::Message(format!("Failed to take ESP peripherals: {e:?}")))?;
+            let sys_loop = EspSystemEventLoop::take()?;
 
-            let demo_cfg = DeviceConfig {
-                wifi: WifiConfig {
-                    ssid: "eps-rust-test".into(),
-                    password: "asdfg43v34t34f34t3".into(),
-                },
-                mqtt: MqttConfig {
-                    host: "10.0.0.1".into(),
-                    port: 1883,
-                    username: "testuser".into(),
-                    password: "testpassword".into(),
-                    client_id: "esp32-test-node".into(),
-                    base_topic: "nks/home/test-node".into(),
-                },
-            };
+            let mut wifi = wifi::start_ap(peripherals.modem, sys_loop, nvs)?;
+            let ssid = wifi.ap_ssid().to_string();
+            let cached_networks = wifi.scan_networks()?;
+            let controller =
+                http::ProvisioningController::new(store, ssid.clone(), cached_networks);
+            let _http_server = http::start_captive_portal_server(controller.clone())?;
 
-            store.save(&demo_cfg)?;
-            info!("Demo config saved to NVS. Reboot to test normal mode path.");
+            info!("Provisioning AP ready on SSID: {ssid}");
+
+            loop {
+                if let Some(cfg) = controller.take_pending_wifi_test()? {
+                    controller.mark_wifi_test_running(&cfg.ssid)?;
+
+                    match wifi.test_sta_connection(&cfg) {
+                        Ok(ip) => controller.mark_wifi_test_success(cfg, ip)?,
+                        Err(error) => controller.mark_wifi_test_error(&error)?,
+                    }
+                }
+
+                thread::sleep(Duration::from_millis(200));
+            }
         }
     }
 

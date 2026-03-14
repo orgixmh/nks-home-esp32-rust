@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NKS Home</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3efe7;
+      --panel: #fffaf2;
+      --ink: #1d2a2f;
+      --accent: #146356;
+      --line: #d7cdbb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at top left, #fff9ec 0, transparent 34%),
+        linear-gradient(160deg, #ede2ce 0%, var(--bg) 58%, #d9ebe5 100%);
+      color: var(--ink);
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      padding: 24px;
+    }
+
+    main {
+      width: min(100%, 560px);
+      background: rgba(255, 250, 242, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 32px;
+      box-shadow: 0 20px 50px rgba(29, 42, 47, 0.12);
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(2rem, 4vw, 3rem);
+      line-height: 1;
+    }
+
+    p {
+      margin: 0;
+      font-size: 1rem;
+      line-height: 1.6;
+    }
+
+    strong {
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Hello, world!</h1>
+    <p>This page is being served directly from the <strong>NKS Home</strong> firmware.</p>
+  </main>
+</body>
+</html>
