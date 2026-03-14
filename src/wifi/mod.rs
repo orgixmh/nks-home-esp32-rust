@@ -13,7 +13,7 @@ pub fn connect_sta(cfg: &WifiConfig) -> Result<BlockingWifi<EspWifi<'static>>, A
     info!("Initializing Wi-Fi station mode");
 
     let peripherals = Peripherals::take()
-        .ok_or_else(|| AppError::Message("Failed to take ESP peripherals".into()))?;
+        .map_err(|e| AppError::Message(format!("Failed to take ESP peripherals: {e:?}")))?;
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
