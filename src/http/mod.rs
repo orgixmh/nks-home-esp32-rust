@@ -32,6 +32,9 @@ struct ProvisioningState {
     pending_wifi_test: Option<WifiConfig>,
     last_successful_wifi: Option<WifiConfig>,
     wifi_test_status: WifiTestStatus,
+    pending_mqtt_test: Option<MqttConfig>,
+    last_successful_mqtt: Option<MqttConfig>,
+    mqtt_test_status: WifiTestStatus,
 }
 
 #[derive(Clone, Serialize)]
@@ -85,6 +88,14 @@ impl ProvisioningController {
                 wifi_test_status: WifiTestStatus {
                     state: "idle",
                     message: "Ready to connect H0m3.".into(),
+                    ip: None,
+                    error_code: None,
+                },
+                pending_mqtt_test: None,
+                last_successful_mqtt: None,
+                mqtt_test_status: WifiTestStatus {
+                    state: "idle",
+                    message: "Ready to connect H0m3 to your broker.".into(),
                     ip: None,
                     error_code: None,
                 },
@@ -183,23 +194,92 @@ impl ProvisioningController {
         Ok(())
     }
 
-    pub fn save_mqtt(&self, payload: MqttPayload) -> Result<String, AppError> {
+    pub fn wifi_for_mqtt_test(&self) -> Result<WifiConfig, AppError> {
+        let state = self.lock()?;
+        state.last_successful_wifi.clone().ok_or_else(|| {
+            AppError::Message("Please finish the Wi-Fi step before broker setup.".into())
+        })
+    }
+
+    pub fn schedule_mqtt_test(&self, payload: MqttPayload) -> Result<(), AppError> {
         let mut state = self.lock()?;
-        let device_id = state.ap_ssid.to_lowercase();
-        let mqtt = MqttConfig {
-            host: payload.broker,
-            port: if payload.protocol.eq_ignore_ascii_case("ssl") {
-                8883
-            } else {
-                1883
-            },
-            username: payload.username,
-            password: payload.password,
-            client_id: device_id.clone(),
-            base_topic: format!("nks/home/{device_id}"),
+        state.pending_mqtt_test = Some(build_mqtt_config(&state.ap_ssid, payload));
+        state.last_successful_mqtt = None;
+        state.mqtt_test_status = WifiTestStatus {
+            state: "scheduled",
+            message: "Connecting H0m3 to your broker.".into(),
+            ip: None,
+            error_code: None,
         };
 
+        Ok(())
+    }
+
+    pub fn take_pending_mqtt_test(&self) -> Result<Option<MqttConfig>, AppError> {
+        Ok(self.lock()?.pending_mqtt_test.take())
+    }
+
+    pub fn mark_mqtt_test_running(&self, host: &str) -> Result<(), AppError> {
+        self.lock()?.mqtt_test_status = WifiTestStatus {
+            state: "testing",
+            message: format!("Checking broker connection to '{host}'"),
+            ip: None,
+            error_code: None,
+        };
+
+        Ok(())
+    }
+
+    pub fn mark_mqtt_test_success(&self, mqtt: MqttConfig) -> Result<(), AppError> {
+        let mut state = self.lock()?;
+        state.last_successful_mqtt = Some(mqtt);
+        state.mqtt_test_status = WifiTestStatus {
+            state: "success",
+            message: "H0m3 connected to your broker successfully.".into(),
+            ip: None,
+            error_code: None,
+        };
+
+        Ok(())
+    }
+
+    pub fn mark_mqtt_test_error(&self, error: &AppError) -> Result<(), AppError> {
+        self.lock()?.mqtt_test_status = WifiTestStatus {
+            state: "error",
+            message: error.to_string(),
+            ip: None,
+            error_code: extract_esp_code(error),
+        };
+
+        Ok(())
+    }
+
+    pub fn mqtt_test_status(&self) -> Result<WifiTestStatus, AppError> {
+        Ok(self.lock()?.mqtt_test_status.clone())
+    }
+
+    pub fn save_tested_mqtt(&self, payload: MqttPayload) -> Result<String, AppError> {
+        let mut state = self.lock()?;
+        let mqtt = build_mqtt_config(&state.ap_ssid, payload);
+        let Some(last_successful_mqtt) = &state.last_successful_mqtt else {
+            return Err(AppError::Message(
+                "Please confirm your broker connection before finishing.".into(),
+            ));
+        };
+
+        if !same_mqtt_config(last_successful_mqtt, &mqtt) {
+            return Err(AppError::Message(
+                "Please use the same broker details you just confirmed.".into(),
+            ));
+        }
+
         state.store.save_mqtt(&mqtt)?;
+        state.mqtt_test_status = WifiTestStatus {
+            state: "saved",
+            message: "H0m3 is ready and will reboot to apply your settings.".into(),
+            ip: None,
+            error_code: None,
+        };
 
         Ok("H0m3 is ready and will reboot to apply your settings.".into())
     }
@@ -373,9 +453,36 @@ pub fn start_captive_portal_server(
 
     {
         let controller = controller.clone();
+        server.fn_handler("/api/test-mqtt", Method::Post, move |mut req| {
+            let payload: MqttPayload = read_json_body(&mut req)?;
+
+            controller.schedule_mqtt_test(payload)?;
+
+            write_json(
+                req,
+                200,
+                "OK",
+                &WifiActionResponse {
+                    ok: true,
+                    message: "Broker connection check started.".into(),
+                },
+            )
+        })?;
+    }
+
+    {
+        let controller = controller.clone();
+        server.fn_handler("/api/mqtt-status", Method::Get, move |req| {
+            let payload = controller.mqtt_test_status()?;
+            write_json(req, 200, "OK", &payload)
+        })?;
+    }
+
+    {
+        let controller = controller.clone();
         server.fn_handler("/api/save-mqtt", Method::Post, move |mut req| {
             let payload: MqttPayload = read_json_body(&mut req)?;
-            let message = controller.save_mqtt(payload)?;
+            let message = controller.save_tested_mqtt(payload)?;
 
             thread::spawn(|| {
                 thread::sleep(Duration::from_secs(3));
@@ -487,4 +594,29 @@ fn extract_esp_code(error: &AppError) -> Option<i32> {
         AppError::EspIo(e) => Some(e.0.code()),
         _ => None,
     }
+}
+
+fn build_mqtt_config(ap_ssid: &str, payload: MqttPayload) -> MqttConfig {
+    let device_id = ap_ssid.to_lowercase();
+    MqttConfig {
+        host: payload.broker,
+        port: if payload.protocol.eq_ignore_ascii_case("ssl") {
+            8883
+        } else {
+            1883
+        },
+        username: payload.username,
+        password: payload.password,
+        client_id: device_id.clone(),
+        base_topic: format!("nks/home/{device_id}"),
+    }
+}
+
+fn same_mqtt_config(left: &MqttConfig, right: &MqttConfig) -> bool {
+    left.host == right.host
+        && left.port == right.port
+        && left.username == right.username
+        && left.password == right.password
+        && left.client_id == right.client_id
+        && left.base_topic == right.base_topic
 }

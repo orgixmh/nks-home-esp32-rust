@@ -50,7 +50,30 @@ mqttForm.addEventListener("submit", async (event) => {
     return;
   }
 
-  await withLoading("Applying MQTT configuration", async () => {
+  await startMqttFlow(payload);
+});
+
+async function startMqttFlow(payload) {
+  showStatus(
+    mqttStatus,
+    "H0m3 is preparing to connect to your broker.",
+    "success",
+  );
+
+  loadingMessage.textContent = "Connecting H0m3 to your broker";
+  loadingOverlay.hidden = false;
+  mqttFinishButton.disabled = true;
+
+  try {
+    await apiRequest("/api/test-mqtt", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    const status = await pollMqttStatus();
+    showStatus(mqttStatus, status.message, "success");
+
+    loadingMessage.textContent = "Saving broker settings";
     const response = await apiRequest("/api/save-mqtt", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -58,8 +81,13 @@ mqttForm.addEventListener("submit", async (event) => {
 
     showStatus(mqttStatus, response.message, "success");
     setStep(3);
-  });
-});
+  } catch (error) {
+    showStatus(mqttStatus, error.message, "error");
+  } finally {
+    mqttFinishButton.disabled = false;
+    loadingOverlay.hidden = true;
+  }
+}
 
 finishButton.addEventListener("click", () => {
   window.close();
@@ -185,6 +213,41 @@ async function pollWifiStatus() {
     if (status) {
       if (status.state === "scheduled" || status.state === "testing") {
         loadingMessage.textContent = status.message || "Connecting H0m3 to your Wi-Fi";
+      } else if (status.state === "success") {
+        return status;
+      } else if (status.state === "error") {
+        const codeSuffix = status.error_code != null ? ` (code ${status.error_code})` : "";
+        throw new Error(`${status.message}${codeSuffix}`);
+      }
+    }
+
+    if (Date.now() >= reconnectHintAt) {
+      loadingMessage.textContent =
+        "Still working. If your phone switched away, reconnect to the H0m3 setup network.";
+    }
+
+    await delay(200);
+  }
+
+  throw new Error("This is taking longer than expected. Please reconnect to the H0m3 setup network and try again.");
+}
+
+async function pollMqttStatus() {
+  const deadline = Date.now() + 60_000;
+  const reconnectHintAt = Date.now() + 10_000;
+
+  while (Date.now() < deadline) {
+    let status = null;
+
+    try {
+      status = await apiRequest("/api/mqtt-status");
+    } catch (_error) {
+      // Temporary disconnects are expected while the ESP reconnects Wi-Fi to reach the broker.
+    }
+
+    if (status) {
+      if (status.state === "scheduled" || status.state === "testing") {
+        loadingMessage.textContent = status.message || "Connecting H0m3 to your broker";
       } else if (status.state === "success") {
         return status;
       } else if (status.state === "error") {

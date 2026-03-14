@@ -112,23 +112,37 @@ impl ProvisioningWifi {
     }
 
     pub fn test_sta_connection(&mut self, cfg: &WifiConfig) -> Result<String, AppError> {
+        self.connect_sta_for_provisioning(cfg)?;
+
+        let result = (|| -> Result<String, AppError> {
+            let ip_info = self.wifi.wifi().sta_netif().get_ip_info()?;
+            Ok(ip_info.ip.to_string())
+        })();
+
+        if result.is_err() {
+            self.disconnect_sta()?;
+        }
+
+        result
+    }
+
+    pub fn connect_sta_for_provisioning(&mut self, cfg: &WifiConfig) -> Result<(), AppError> {
         let client_cfg = client_configuration(cfg)?;
 
         self.wifi
             .set_configuration(&Configuration::Mixed(client_cfg, self.ap_config.clone()))?;
         info!("Testing Wi-Fi configuration for SSID '{}'", cfg.ssid);
 
-        let result = (|| -> Result<String, AppError> {
-            self.wifi.connect()?;
-            self.wifi.ip_wait_while(
-                || self.wifi.wifi().sta_netif().is_up().map(|is_up| !is_up),
-                Some(Duration::from_secs(20)),
-            )?;
+        self.wifi.connect()?;
+        self.wifi.ip_wait_while(
+            || self.wifi.wifi().sta_netif().is_up().map(|is_up| !is_up),
+            Some(Duration::from_secs(20)),
+        )?;
 
-            let ip_info = self.wifi.wifi().sta_netif().get_ip_info()?;
-            Ok(ip_info.ip.to_string())
-        })();
+        Ok(())
+    }
 
+    pub fn disconnect_sta(&mut self) -> Result<(), AppError> {
         let _ = self.wifi.disconnect();
         self.ensure_mixed_mode()?;
         let _ = self.wifi.ip_wait_while(
@@ -136,7 +150,7 @@ impl ProvisioningWifi {
             None,
         );
 
-        result
+        Ok(())
     }
 
     fn ensure_mixed_mode(&mut self) -> Result<(), AppError> {
