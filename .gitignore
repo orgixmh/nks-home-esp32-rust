@@ -1,0 +1,29 @@
+# Rust / build artifacts
+/target/
+debug/
+release/
+
+# ESP-RS / embuild generated files
+.embuild/
+
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary / backup files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Local env / secrets
+.env
+.env.*
+*.local
+
+# Python cache for helper scripts
+__pycache__/
+*.pyc
