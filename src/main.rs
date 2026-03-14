@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod error;
 mod storage;
+mod wifi;
 
 //use esp_idf_svc::sys as _;
 use log::info;
@@ -28,7 +29,7 @@ fn main() -> Result<(), AppError> {
             info!("MQTT host: {}:{}", cfg.mqtt.host, cfg.mqtt.port);
 
             // next step:
-            // wifi::connect(&cfg.wifi)?;
+            let _wifi = wifi::connect_sta(&cfg.wifi)?;
             // mqtt::connect(&cfg.mqtt)?;
         }
         BootMode::Provisioning => {
