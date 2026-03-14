@@ -1,3 +1,4 @@
+use esp_idf_svc::io::EspIOError;
 use esp_idf_svc::sys::EspError;
 use std::fmt::{Display, Formatter};
 
@@ -5,6 +6,7 @@ use std::fmt::{Display, Formatter};
 pub enum AppError {
     Message(String),
     Esp(EspError),
+    EspIo(EspIOError),
     Utf8(std::string::FromUtf8Error),
     ParseInt(std::num::ParseIntError),
 }
@@ -14,6 +16,7 @@ impl Display for AppError {
         match self {
             Self::Message(msg) => write!(f, "{msg}"),
             Self::Esp(e) => write!(f, "ESP error: {e}"),
+            Self::EspIo(e) => write!(f, "ESP I/O error: {e}"),
             Self::Utf8(e) => write!(f, "UTF-8 error: {e}"),
             Self::ParseInt(e) => write!(f, "Parse int error: {e}"),
         }
@@ -25,6 +28,12 @@ impl std::error::Error for AppError {}
 impl From<EspError> for AppError {
     fn from(value: EspError) -> Self {
         Self::Esp(value)
+    }
+}
+
+impl From<EspIOError> for AppError {
+    fn from(value: EspIOError) -> Self {
+        Self::EspIo(value)
     }
 }
 

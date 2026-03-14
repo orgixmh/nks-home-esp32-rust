@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod error;
+mod http;
 mod storage;
 mod wifi;
 
@@ -39,6 +40,7 @@ fn main() -> Result<(), AppError> {
             info!("MQTT host: {}:{}", cfg.mqtt.host, cfg.mqtt.port);
 
             let _wifi = wifi::connect_sta(peripherals.modem, sys_loop, nvs, &cfg.wifi)?;
+            let _http_server = http::start_server()?;
             // mqtt::connect(&cfg.mqtt)?;
 
             loop {
