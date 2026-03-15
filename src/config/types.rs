@@ -28,6 +28,8 @@ pub struct DeviceConfig {
 pub struct ResourceConfig {
     #[serde(default)]
     pub module_instances: Vec<ModuleInstanceConfig>,
+    #[serde(default)]
+    pub device_instances: Vec<DeviceInstanceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,11 +42,25 @@ pub struct ModuleInstanceConfig {
     pub settings: ModuleSettings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInstanceConfig {
+    pub id: String,
+    pub device_type: DeviceType,
+    pub display_name: Option<String>,
+    pub driver_module_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModuleType {
     Switch,
     GpioOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceType {
+    Switch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

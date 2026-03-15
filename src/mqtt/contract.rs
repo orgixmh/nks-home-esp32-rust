@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::board::BoardProfile;
 use crate::config::types::{MqttConfig, ResourceConfig};
+use crate::devices::{DeviceConfigSnapshot, DeviceTypeSchemaSnapshot};
 use crate::error::AppError;
 use crate::gpio::ResourceConfigSnapshot;
 use crate::mqtt::{MqttLastWill, MqttManager, MqttMessage, QoS};
@@ -94,6 +95,14 @@ impl MqttTopics {
         format!("{}/evt/config_result", self.base_topic)
     }
 
+    pub fn devices_config(&self) -> String {
+        format!("{}/config/devices", self.base_topic)
+    }
+
+    pub fn device_types_config(&self) -> String {
+        format!("{}/config/device_types", self.base_topic)
+    }
+
     pub fn get_config_command(&self) -> String {
         format!("{}/cmd/get_config", self.base_topic)
     }
@@ -122,6 +131,18 @@ impl MqttTopics {
         format!("{}/mod/+/cmd", self.base_topic)
     }
 
+    pub fn device_command(&self, device_id: &str) -> String {
+        format!("{}/dev/{device_id}/cmd", self.base_topic)
+    }
+
+    pub fn device_state(&self, device_id: &str) -> String {
+        format!("{}/dev/{device_id}/state", self.base_topic)
+    }
+
+    pub fn device_command_wildcard(&self) -> String {
+        format!("{}/dev/+/cmd", self.base_topic)
+    }
+
     pub fn parse_module_command_topic(&self, topic: &str) -> Option<String> {
         let prefix = format!("{}/mod/", self.base_topic);
         let suffix = "/cmd";
@@ -135,6 +156,22 @@ impl MqttTopics {
             None
         } else {
             Some(module_id.to_string())
+        }
+    }
+
+    pub fn parse_device_command_topic(&self, topic: &str) -> Option<String> {
+        let prefix = format!("{}/dev/", self.base_topic);
+        let suffix = "/cmd";
+
+        if !topic.starts_with(&prefix) || !topic.ends_with(suffix) {
+            return None;
+        }
+
+        let device_id = &topic[prefix.len()..topic.len() - suffix.len()];
+        if device_id.is_empty() || device_id.contains('/') {
+            None
+        } else {
+            Some(device_id.to_string())
         }
     }
 }
@@ -171,6 +208,8 @@ impl MqttContract {
         &self,
         mqtt: &mut MqttManager,
         resources: &ResourceConfigSnapshot,
+        devices: &DeviceConfigSnapshot,
+        device_types: &[DeviceTypeSchemaSnapshot],
     ) -> Result<(), AppError> {
         mqtt.publish_json(
             &self.topics.availability(),
@@ -188,6 +227,18 @@ impl MqttContract {
         mqtt.publish_json(
             &self.topics.resources_config(),
             resources,
+            QoS::AtLeastOnce,
+            true,
+        )?;
+        mqtt.publish_json(
+            &self.topics.devices_config(),
+            devices,
+            QoS::AtLeastOnce,
+            true,
+        )?;
+        mqtt.publish_json(
+            &self.topics.device_types_config(),
+            &device_types,
             QoS::AtLeastOnce,
             true,
         )?;

@@ -6,21 +6,12 @@ use esp_idf_svc::hal::gpio::{AnyIOPin, Output, PinDriver};
 use log::{error, info};
 
 use crate::error::AppError;
+use crate::runtime::{DegradedReason, OperationalStatus, RuntimeAction, RuntimeState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndicatorMode {
     Off,
-    Provisioning,
-    NormalStartup,
-    Operational,
-    Error(ErrorKind),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorKind {
-    Wifi,
-    Mqtt,
-    Unknown,
+    State(RuntimeState),
 }
 
 pub struct LedIndicator {
@@ -81,34 +72,45 @@ fn run_indicator_loop(
                     &mut current_mode,
                 );
             }
-            IndicatorMode::Provisioning => {
-                blink(
-                    led,
-                    &command_rx,
-                    &mut current_mode,
-                    Duration::from_millis(120),
-                    Duration::from_millis(120),
-                )?;
-            }
-            IndicatorMode::NormalStartup => {
-                blink(
-                    led,
-                    &command_rx,
-                    &mut current_mode,
-                    Duration::from_millis(500),
-                    Duration::from_millis(500),
-                )?;
-            }
-            IndicatorMode::Operational => {
-                led.set_high()?;
-                wait_for_next_mode(
-                    command_rx.recv_timeout(Duration::from_millis(200)),
-                    &mut current_mode,
-                );
-            }
-            IndicatorMode::Error(kind) => {
-                run_error_pattern(led, &command_rx, &mut current_mode, kind)?;
-            }
+            IndicatorMode::State(state) => match state.status {
+                OperationalStatus::Provisioning => {
+                    blink(
+                        led,
+                        &command_rx,
+                        &mut current_mode,
+                        Duration::from_millis(120),
+                        Duration::from_millis(120),
+                    )?;
+                }
+                OperationalStatus::Operational => {
+                    if matches!(
+                        state.action,
+                        Some(RuntimeAction::WifiConnecting | RuntimeAction::MqttConnecting)
+                    ) {
+                        blink(
+                            led,
+                            &command_rx,
+                            &mut current_mode,
+                            Duration::from_millis(500),
+                            Duration::from_millis(500),
+                        )?;
+                    } else {
+                        led.set_high()?;
+                        wait_for_next_mode(
+                            command_rx.recv_timeout(Duration::from_millis(200)),
+                            &mut current_mode,
+                        );
+                    }
+                }
+                OperationalStatus::Degraded => {
+                    run_error_pattern(
+                        led,
+                        &command_rx,
+                        &mut current_mode,
+                        state.reason.unwrap_or(DegradedReason::Unknown),
+                    )?;
+                }
+            },
         }
     }
 }
@@ -138,12 +140,12 @@ fn run_error_pattern(
     led: &mut PinDriver<'static, AnyIOPin, Output>,
     command_rx: &mpsc::Receiver<IndicatorMode>,
     current_mode: &mut IndicatorMode,
-    kind: ErrorKind,
+    reason: DegradedReason,
 ) -> Result<(), AppError> {
-    let flashes = match kind {
-        ErrorKind::Wifi => 2,
-        ErrorKind::Mqtt => 4,
-        ErrorKind::Unknown => 8,
+    let flashes = match reason {
+        DegradedReason::WifiDisconnected => 2,
+        DegradedReason::MqttDisconnected => 4,
+        DegradedReason::Unknown => 8,
     };
 
     led.set_low()?;

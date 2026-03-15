@@ -1,6 +1,7 @@
 mod app;
 mod board;
 mod config;
+mod devices;
 mod error;
 mod gpio;
 mod http;

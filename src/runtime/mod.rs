@@ -14,26 +14,42 @@ use log::{error, info, warn};
 
 use crate::app::{detect_boot_mode, BootMode};
 use crate::board::BoardProfile;
+use crate::devices::{DeviceCommand, DeviceRegistry};
 use crate::error::AppError;
 use crate::gpio::GpioManager;
 use crate::http::{self, ProvisioningController};
 use crate::modules::{ModuleCommand, ModuleManager};
 use crate::mqtt;
 use crate::mqtt::contract::{ConfigOperationResultPayload, ContractAction, MqttContract};
-use crate::runtime::indicator::{ErrorKind, IndicatorMode, LedIndicator};
+use crate::runtime::indicator::{IndicatorMode, LedIndicator};
 use crate::storage::nvs::ConfigStore;
 use crate::wifi;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppState {
-    Booting,
+pub enum OperationalStatus {
     Provisioning,
-    NormalStartup,
+    Operational,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DegradedReason {
+    WifiDisconnected,
+    MqttDisconnected,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeAction {
     WifiConnecting,
     MqttConnecting,
-    Operational,
-    RestartPending,
-    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeState {
+    pub status: OperationalStatus,
+    pub reason: Option<DegradedReason>,
+    pub action: Option<RuntimeAction>,
 }
 
 #[derive(Clone, Default)]
@@ -52,9 +68,7 @@ impl RuntimeSignals {
 }
 
 pub struct AppController {
-    state: AppState,
-    error_kind: ErrorKind,
-    recovering_from_error: bool,
+    state: RuntimeState,
     signals: RuntimeSignals,
     nvs: EspDefaultNvsPartition,
     store: ConfigStore,
@@ -66,6 +80,7 @@ pub struct AppController {
 
 enum RuntimeCommand {
     Contract(ContractAction),
+    Device(DeviceCommand),
     Module(ModuleCommand),
 }
 
@@ -74,9 +89,11 @@ impl AppController {
         let store = ConfigStore::with_partition(nvs.clone());
 
         Self {
-            state: AppState::Booting,
-            error_kind: ErrorKind::Unknown,
-            recovering_from_error: false,
+            state: RuntimeState {
+                status: OperationalStatus::Degraded,
+                reason: Some(DegradedReason::Unknown),
+                action: None,
+            },
             signals: RuntimeSignals::default(),
             nvs,
             store,
@@ -88,7 +105,6 @@ impl AppController {
     }
 
     pub fn run(mut self) -> Result<(), AppError> {
-        self.transition_to(AppState::Booting);
         self.led_indicator.set_mode(IndicatorMode::Off);
         self.clear_legacy_demo_config()?;
         self.initialize_resource_runtime()?;
@@ -112,7 +128,11 @@ impl AppController {
 
     fn initialize_resource_runtime(&mut self) -> Result<(), AppError> {
         let resources = self.store.load_resources()?;
-        match self.gpio_manager.validate_config(&resources) {
+        match self
+            .gpio_manager
+            .validate_config(&resources)
+            .and_then(|_| DeviceRegistry::validate_config(&resources))
+        {
             Ok(()) => {
                 let snapshot = self.gpio_manager.snapshot(&resources);
                 info!(
@@ -130,7 +150,7 @@ impl AppController {
     }
 
     fn run_normal_mode(&mut self) -> Result<(), AppError> {
-        self.transition_to(AppState::NormalStartup);
+        self.set_operational_action(Some(RuntimeAction::WifiConnecting));
 
         let result = (|| -> Result<(), AppError> {
             info!("Complete config found in NVS, entering normal mode");
@@ -148,7 +168,7 @@ impl AppController {
             let contract = MqttContract::new(&cfg.mqtt, BoardProfile::esp32_devkit_v1());
             let (command_tx, command_rx) = mpsc::channel();
 
-            self.transition_to(AppState::WifiConnecting);
+            self.set_operational_action(Some(RuntimeAction::WifiConnecting));
             let mut wifi =
                 wifi::create_sta(peripherals.modem, sys_loop, self.nvs.clone(), &cfg.wifi)?;
             self.connect_wifi_with_retry(&mut wifi)?;
@@ -160,19 +180,27 @@ impl AppController {
                     ModuleManager::empty()
                 }
             };
+            let mut device_registry = match DeviceRegistry::load(&resources) {
+                Ok(registry) => registry,
+                Err(error) => {
+                    error!("Failed to initialize logical devices: {error}");
+                    DeviceRegistry::empty()
+                }
+            };
 
-            self.transition_to(AppState::MqttConnecting);
+            self.set_operational_action(Some(RuntimeAction::MqttConnecting));
             let mut mqtt = Some(self.establish_mqtt_session(
                 &cfg.mqtt,
                 &contract,
                 &resources,
                 &mut module_manager,
+                &device_registry,
                 &command_tx,
                 &wifi,
             )?);
 
             let _http_server = http::start_server(self.store_partition(), self.signals.clone())?;
-            self.transition_to(AppState::Operational);
+            self.set_operational_action(None);
 
             self.run_operational_loop(
                 &mut wifi,
@@ -183,6 +211,7 @@ impl AppController {
                 &command_rx,
                 &mut resources,
                 &mut module_manager,
+                &mut device_registry,
             )
         })();
 
@@ -196,7 +225,7 @@ impl AppController {
             let peripherals = take_peripherals()?;
             let sys_loop = EspSystemEventLoop::take()?;
 
-            self.transition_to(AppState::Provisioning);
+            self.set_provisioning_action(None);
 
             let mut wifi = wifi::start_ap(peripherals.modem, sys_loop, self.nvs.clone())?;
             let ssid = wifi.ap_ssid().to_string();
@@ -209,12 +238,12 @@ impl AppController {
             info!("Provisioning AP ready on SSID: {ssid}");
 
             loop {
-                if self.signals.is_restart_pending() && self.state != AppState::RestartPending {
-                    self.transition_to(AppState::RestartPending);
+                if self.signals.is_restart_pending() {
+                    self.led_indicator.set_mode(IndicatorMode::Off);
                 }
 
                 if let Some(cfg) = controller.take_pending_wifi_test()? {
-                    self.transition_to(AppState::WifiConnecting);
+                    self.set_provisioning_action(Some(RuntimeAction::WifiConnecting));
                     controller.mark_wifi_test_running(&cfg.ssid)?;
 
                     match wifi.test_sta_connection(&cfg) {
@@ -223,12 +252,12 @@ impl AppController {
                     }
 
                     if !self.signals.is_restart_pending() {
-                        self.transition_to(AppState::Provisioning);
+                        self.set_provisioning_action(None);
                     }
                 }
 
                 if let Some(cfg) = controller.take_pending_mqtt_test()? {
-                    self.transition_to(AppState::MqttConnecting);
+                    self.set_provisioning_action(Some(RuntimeAction::MqttConnecting));
                     controller.mark_mqtt_test_running(&cfg.host)?;
 
                     match controller.wifi_for_mqtt_test() {
@@ -240,7 +269,7 @@ impl AppController {
                     }
 
                     if !self.signals.is_restart_pending() {
-                        self.transition_to(AppState::Provisioning);
+                        self.set_provisioning_action(None);
                     }
                 }
 
@@ -253,9 +282,7 @@ impl AppController {
 
     fn finish_result(&mut self, result: Result<(), AppError>) -> Result<(), AppError> {
         if let Err(error) = &result {
-            let error_kind = self.error_kind_for_current_state();
-            self.error_kind = error_kind;
-            self.transition_to(AppState::Degraded);
+            self.set_degraded(self.reason_for_current_action(), None);
             error!("Application runtime degraded: {error}");
         }
 
@@ -266,20 +293,49 @@ impl AppController {
         ConfigStore::with_partition(self.nvs.clone())
     }
 
-    fn transition_to(&mut self, next: AppState) {
-        if self.state != next {
-            info!("App state transition: {:?} -> {:?}", self.state, next);
-            self.state = next;
-            if next == AppState::Operational {
-                self.recovering_from_error = false;
-            }
-            self.update_indicator_for_state();
-        }
-    }
-
     fn idle_forever(&self) -> Result<(), AppError> {
         loop {
             thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    fn set_runtime_state(&mut self, next: RuntimeState) {
+        if self.state != next {
+            info!("Runtime state transition: {:?} -> {:?}", self.state, next);
+            self.state = next;
+            self.led_indicator.set_mode(IndicatorMode::State(next));
+        }
+    }
+
+    fn set_operational_action(&mut self, action: Option<RuntimeAction>) {
+        self.set_runtime_state(RuntimeState {
+            status: OperationalStatus::Operational,
+            reason: None,
+            action,
+        });
+    }
+
+    fn set_provisioning_action(&mut self, action: Option<RuntimeAction>) {
+        self.set_runtime_state(RuntimeState {
+            status: OperationalStatus::Provisioning,
+            reason: None,
+            action,
+        });
+    }
+
+    fn set_degraded(&mut self, reason: DegradedReason, action: Option<RuntimeAction>) {
+        self.set_runtime_state(RuntimeState {
+            status: OperationalStatus::Degraded,
+            reason: Some(reason),
+            action,
+        });
+    }
+
+    fn reason_for_current_action(&self) -> DegradedReason {
+        match self.state.action {
+            Some(RuntimeAction::WifiConnecting) => DegradedReason::WifiDisconnected,
+            Some(RuntimeAction::MqttConnecting) => DegradedReason::MqttDisconnected,
+            None => DegradedReason::Unknown,
         }
     }
 
@@ -293,6 +349,7 @@ impl AppController {
         command_rx: &mpsc::Receiver<RuntimeCommand>,
         resources: &mut crate::config::types::ResourceConfig,
         module_manager: &mut ModuleManager,
+        device_registry: &mut DeviceRegistry,
     ) -> Result<(), AppError> {
         loop {
             self.check_runtime_connectivity(
@@ -303,13 +360,34 @@ impl AppController {
                 command_tx,
                 resources,
                 module_manager,
+                device_registry,
             )?;
 
-            module_manager.poll(mqtt.as_mut(), contract.topics())?;
+            let changed_modules = module_manager.poll_changes()?;
+            if let Some(mqtt) = mqtt.as_mut() {
+                module_manager.publish_states_for_modules(
+                    mqtt,
+                    contract.topics(),
+                    &changed_modules,
+                )?;
+                device_registry.publish_states_for_modules(
+                    mqtt,
+                    contract.topics(),
+                    module_manager,
+                    &changed_modules,
+                )?;
+            }
 
             while let Ok(action) = command_rx.try_recv() {
                 if let Some(mqtt) = mqtt.as_mut() {
-                    self.handle_runtime_command(mqtt, contract, resources, module_manager, action)?;
+                    self.handle_runtime_command(
+                        mqtt,
+                        contract,
+                        resources,
+                        module_manager,
+                        device_registry,
+                        action,
+                    )?;
                 }
             }
 
@@ -326,11 +404,13 @@ impl AppController {
         command_tx: &mpsc::Sender<RuntimeCommand>,
         resources: &crate::config::types::ResourceConfig,
         module_manager: &mut ModuleManager,
+        device_registry: &DeviceRegistry,
     ) -> Result<(), AppError> {
         if !wifi.is_connected()? || !wifi.is_up()? {
-            self.error_kind = ErrorKind::Wifi;
-            self.recovering_from_error = true;
-            self.transition_to(AppState::Degraded);
+            self.set_degraded(
+                DegradedReason::WifiDisconnected,
+                Some(RuntimeAction::WifiConnecting),
+            );
             let now = Instant::now();
             let retry_at = *self
                 .wifi_retry_at
@@ -342,12 +422,17 @@ impl AppController {
 
             // Stop MQTT retries while the STA link is down.
             let _ = mqtt.take();
-            self.transition_to(AppState::WifiConnecting);
+            self.set_degraded(
+                DegradedReason::WifiDisconnected,
+                Some(RuntimeAction::WifiConnecting),
+            );
 
             if let Err(error) = wifi.connect().and_then(|_| wifi.wait_netif_up()) {
                 warn!("Wi-Fi reconnect attempt failed: {error}");
-                self.error_kind = ErrorKind::Wifi;
-                self.transition_to(AppState::Degraded);
+                self.set_degraded(
+                    DegradedReason::WifiDisconnected,
+                    Some(RuntimeAction::WifiConnecting),
+                );
                 self.wifi_retry_at = Some(Instant::now() + Duration::from_secs(2));
                 return Ok(());
             }
@@ -355,24 +440,29 @@ impl AppController {
             self.wifi_retry_at = None;
             self.mqtt_retry_at = None;
 
-            self.transition_to(AppState::MqttConnecting);
+            self.set_degraded(
+                DegradedReason::MqttDisconnected,
+                Some(RuntimeAction::MqttConnecting),
+            );
             match self.establish_mqtt_session(
                 mqtt_config,
                 contract,
                 resources,
                 module_manager,
+                device_registry,
                 command_tx,
                 wifi,
             ) {
                 Ok(session) => {
                     *mqtt = Some(session);
-                    self.transition_to(AppState::Operational);
+                    self.set_operational_action(None);
                 }
                 Err(error) => {
                     warn!("MQTT reconnect after Wi-Fi recovery failed: {error}");
-                    self.error_kind = classify_wifi_first(wifi)?;
-                    self.recovering_from_error = true;
-                    self.transition_to(AppState::Degraded);
+                    self.set_degraded(
+                        classify_wifi_first(wifi)?,
+                        Some(RuntimeAction::MqttConnecting),
+                    );
                     self.mqtt_retry_at = Some(Instant::now() + Duration::from_secs(2));
                 }
             }
@@ -384,9 +474,10 @@ impl AppController {
             .as_ref()
             .is_some_and(|mqtt| mqtt.is_connected().ok() == Some(false))
         {
-            self.error_kind = ErrorKind::Mqtt;
-            self.recovering_from_error = true;
-            self.transition_to(AppState::Degraded);
+            self.set_degraded(
+                DegradedReason::MqttDisconnected,
+                Some(RuntimeAction::MqttConnecting),
+            );
             let now = Instant::now();
             let retry_at = *self
                 .mqtt_retry_at
@@ -396,23 +487,46 @@ impl AppController {
                 return Ok(());
             }
 
-            self.transition_to(AppState::MqttConnecting);
+            self.set_degraded(
+                DegradedReason::MqttDisconnected,
+                Some(RuntimeAction::MqttConnecting),
+            );
 
             let Some(active_mqtt) = mqtt.as_mut() else {
                 return Ok(());
             };
 
             if let Err(error) = active_mqtt.wait_until_connected(Duration::from_secs(15)) {
-                self.error_kind = classify_wifi_first(wifi)?;
+                let reason = classify_wifi_first(wifi)?;
                 warn!("MQTT reconnect attempt failed: {error}");
-                self.transition_to(AppState::Degraded);
+                self.set_degraded(reason, Some(RuntimeAction::MqttConnecting));
                 self.mqtt_retry_at = Some(Instant::now() + Duration::from_secs(2));
                 return Ok(());
             }
             self.mqtt_retry_at = None;
-            contract.publish_birth(active_mqtt, &self.gpio_manager.snapshot(resources))?;
+            contract.publish_birth(
+                active_mqtt,
+                &self.gpio_manager.snapshot(resources),
+                &device_registry.snapshot(resources),
+                &device_registry.type_schemas(),
+            )?;
             module_manager.publish_initial_states(active_mqtt, contract.topics())?;
-            self.transition_to(AppState::Operational);
+            device_registry.publish_initial_states(
+                active_mqtt,
+                contract.topics(),
+                module_manager,
+            )?;
+            self.set_operational_action(None);
+        }
+
+        if self.state.status == OperationalStatus::Degraded
+            && self.state.reason == Some(DegradedReason::MqttDisconnected)
+            && self.state.action == Some(RuntimeAction::MqttConnecting)
+            && mqtt
+                .as_ref()
+                .is_some_and(|mqtt| mqtt.is_connected().ok() == Some(true))
+        {
+            self.set_operational_action(None);
         }
 
         Ok(())
@@ -424,16 +538,46 @@ impl AppController {
         contract: &MqttContract,
         resources: &mut crate::config::types::ResourceConfig,
         module_manager: &mut ModuleManager,
+        device_registry: &mut DeviceRegistry,
         action: RuntimeCommand,
     ) -> Result<(), AppError> {
         match action {
-            RuntimeCommand::Contract(action) => {
-                self.handle_contract_action(mqtt, contract, resources, module_manager, action)
+            RuntimeCommand::Contract(action) => self.handle_contract_action(
+                mqtt,
+                contract,
+                resources,
+                module_manager,
+                device_registry,
+                action,
+            ),
+            RuntimeCommand::Device(command) => {
+                if let Err(error) =
+                    device_registry.handle_command(mqtt, contract.topics(), module_manager, command)
+                {
+                    warn!("Device command failed: {error}");
+                }
+                Ok(())
             }
             RuntimeCommand::Module(command) => {
-                if let Err(error) = module_manager.handle_command(mqtt, contract.topics(), command)
-                {
-                    warn!("Module command failed: {error}");
+                let command_text = String::from_utf8(command.payload.clone())
+                    .map_err(AppError::from)?
+                    .trim()
+                    .to_uppercase();
+                match module_manager.execute_command(&command.module_id, &command_text) {
+                    Ok(changed_modules) => {
+                        module_manager.publish_states_for_modules(
+                            mqtt,
+                            contract.topics(),
+                            &changed_modules,
+                        )?;
+                        device_registry.publish_states_for_modules(
+                            mqtt,
+                            contract.topics(),
+                            module_manager,
+                            &changed_modules,
+                        )?;
+                    }
+                    Err(error) => warn!("Module command failed: {error}"),
                 }
                 Ok(())
             }
@@ -446,18 +590,24 @@ impl AppController {
         contract: &MqttContract,
         resources: &mut crate::config::types::ResourceConfig,
         module_manager: &mut ModuleManager,
+        device_registry: &mut DeviceRegistry,
         action: ContractAction,
     ) -> Result<(), AppError> {
         match action {
             ContractAction::GetConfig { request_id } => {
                 let snapshot = self.gpio_manager.snapshot(resources);
-                contract.publish_birth(mqtt, &snapshot)?;
+                contract.publish_birth(
+                    mqtt,
+                    &snapshot,
+                    &device_registry.snapshot(resources),
+                    &device_registry.type_schemas(),
+                )?;
                 contract.publish_config_result(
                     mqtt,
                     &MqttContract::ok_result(
                         "get_config",
                         request_id,
-                        "Published current board and resource configuration.",
+                        "Published current board, resource, and device configuration.",
                     ),
                 )?;
             }
@@ -465,7 +615,11 @@ impl AppController {
                 request_id,
                 resources: proposed_resources,
             } => {
-                let result = match self.gpio_manager.validate_config(&proposed_resources) {
+                let result = match self
+                    .gpio_manager
+                    .validate_config(&proposed_resources)
+                    .and_then(|_| DeviceRegistry::validate_config(&proposed_resources))
+                {
                     Ok(()) => MqttContract::ok_result(
                         "validate_resources",
                         request_id,
@@ -483,16 +637,33 @@ impl AppController {
             ContractAction::SetResources {
                 request_id,
                 resources: proposed_resources,
-            } => match self.gpio_manager.validate_config(&proposed_resources) {
+            } => match self
+                .gpio_manager
+                .validate_config(&proposed_resources)
+                .and_then(|_| DeviceRegistry::validate_config(&proposed_resources))
+            {
                 Ok(()) => {
                     let reloaded_modules = self.load_runtime_modules(&proposed_resources)?;
+                    let reloaded_devices = DeviceRegistry::load(&proposed_resources)?;
                     self.store.save_resources(&proposed_resources)?;
                     *resources = proposed_resources;
                     *module_manager = reloaded_modules;
+                    *device_registry = reloaded_devices;
 
                     let snapshot = self.gpio_manager.snapshot(resources);
                     contract.publish_resources_snapshot(mqtt, &snapshot)?;
+                    contract.publish_birth(
+                        mqtt,
+                        &snapshot,
+                        &device_registry.snapshot(resources),
+                        &device_registry.type_schemas(),
+                    )?;
                     module_manager.publish_initial_states(mqtt, contract.topics())?;
+                    device_registry.publish_initial_states(
+                        mqtt,
+                        contract.topics(),
+                        module_manager,
+                    )?;
                     contract.publish_config_result(
                         mqtt,
                         &MqttContract::ok_result(
@@ -548,42 +719,13 @@ impl AppController {
                 }
                 Err(error) => {
                     warn!("Initial Wi-Fi connect attempt failed: {error}");
-                    self.error_kind = ErrorKind::Wifi;
-                    self.transition_to(AppState::Degraded);
+                    self.set_degraded(
+                        DegradedReason::WifiDisconnected,
+                        Some(RuntimeAction::WifiConnecting),
+                    );
                     thread::sleep(Duration::from_secs(2));
-                    self.transition_to(AppState::WifiConnecting);
                 }
             }
-        }
-    }
-
-    fn update_indicator_for_state(&self) {
-        let mode = if self.recovering_from_error
-            && matches!(
-                self.state,
-                AppState::Degraded | AppState::WifiConnecting | AppState::MqttConnecting
-            ) {
-            IndicatorMode::Error(self.error_kind)
-        } else {
-            match self.state {
-                AppState::Provisioning => IndicatorMode::Provisioning,
-                AppState::NormalStartup | AppState::WifiConnecting | AppState::MqttConnecting => {
-                    IndicatorMode::NormalStartup
-                }
-                AppState::Operational => IndicatorMode::Operational,
-                AppState::Degraded => IndicatorMode::Error(self.error_kind),
-                AppState::Booting | AppState::RestartPending => IndicatorMode::Off,
-            }
-        };
-
-        self.led_indicator.set_mode(mode);
-    }
-
-    fn error_kind_for_current_state(&self) -> ErrorKind {
-        match self.state {
-            AppState::WifiConnecting => ErrorKind::Wifi,
-            AppState::MqttConnecting => ErrorKind::Mqtt,
-            _ => ErrorKind::Unknown,
         }
     }
 
@@ -593,16 +735,21 @@ impl AppController {
         contract: &MqttContract,
         resources: &crate::config::types::ResourceConfig,
         module_manager: &mut ModuleManager,
+        device_registry: &DeviceRegistry,
         command_tx: &mpsc::Sender<RuntimeCommand>,
         wifi: &esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
     ) -> Result<mqtt::MqttManager, AppError> {
         let last_will = contract.last_will()?;
         let command_topic = contract.topics().command_wildcard();
+        let device_command_topic = contract.topics().device_command_wildcard();
         let module_command_topic = contract.topics().module_command_wildcard();
         let mut mqtt = mqtt::MqttManager::connect_with_last_will(mqtt_config, Some(&last_will))?;
 
         if let Err(error) = mqtt.wait_until_connected(Duration::from_secs(15)) {
-            self.error_kind = classify_wifi_first(wifi)?;
+            self.set_degraded(
+                classify_wifi_first(wifi)?,
+                Some(RuntimeAction::MqttConnecting),
+            );
             return Err(error);
         }
 
@@ -612,6 +759,19 @@ impl AppController {
 
             move |message| {
                 let _ = command_tx.send(RuntimeCommand::Contract(contract.parse_action(message)));
+            }
+        })?;
+        mqtt.subscribe(device_command_topic.as_str(), QoS::AtMostOnce, {
+            let command_tx = command_tx.clone();
+            let topics = contract.topics().clone();
+
+            move |message| {
+                if let Some(device_id) = topics.parse_device_command_topic(&message.topic) {
+                    let _ = command_tx.send(RuntimeCommand::Device(DeviceCommand {
+                        device_id,
+                        payload: message.payload.clone(),
+                    }));
+                }
             }
         })?;
         mqtt.subscribe(module_command_topic.as_str(), QoS::AtMostOnce, {
@@ -627,8 +787,14 @@ impl AppController {
                 }
             }
         })?;
-        contract.publish_birth(&mut mqtt, &self.gpio_manager.snapshot(resources))?;
+        contract.publish_birth(
+            &mut mqtt,
+            &self.gpio_manager.snapshot(resources),
+            &device_registry.snapshot(resources),
+            &device_registry.type_schemas(),
+        )?;
         module_manager.publish_initial_states(&mut mqtt, contract.topics())?;
+        device_registry.publish_initial_states(&mut mqtt, contract.topics(), module_manager)?;
 
         Ok(mqtt)
     }
@@ -641,10 +807,10 @@ fn take_peripherals() -> Result<Peripherals, AppError> {
 
 fn classify_wifi_first(
     wifi: &esp_idf_svc::wifi::BlockingWifi<esp_idf_svc::wifi::EspWifi<'static>>,
-) -> Result<ErrorKind, AppError> {
+) -> Result<DegradedReason, AppError> {
     if !wifi.is_connected()? || !wifi.is_up()? {
-        Ok(ErrorKind::Wifi)
+        Ok(DegradedReason::WifiDisconnected)
     } else {
-        Ok(ErrorKind::Mqtt)
+        Ok(DegradedReason::MqttDisconnected)
     }
 }
