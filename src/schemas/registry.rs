@@ -178,7 +178,11 @@ impl SchemaRegistry {
                         name: field.name.to_string(),
                         value_type: field.value_type.to_string(),
                         automation_readable: field.automation_readable,
-                        operators: field.operators.iter().map(|value| (*value).to_string()).collect(),
+                        operators: field
+                            .operators
+                            .iter()
+                            .map(|value| (*value).to_string())
+                            .collect(),
                     })
                     .collect(),
                 capabilities: schema

@@ -72,7 +72,8 @@ fn run_indicator_loop(
         match current_mode {
             IndicatorMode::Off => {
                 led.set_low()?;
-                current_mode = wait_for_mode_change(&mode, current_mode, Duration::from_millis(200));
+                current_mode =
+                    wait_for_mode_change(&mode, current_mode, Duration::from_millis(200));
             }
             IndicatorMode::State(state) => match state.status {
                 OperationalStatus::Provisioning => {

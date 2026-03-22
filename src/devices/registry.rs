@@ -126,7 +126,10 @@ impl DeviceRegistry {
 
         for module in &config.module_instances {
             let schema = schemas.lookup_module_type_required(&module.module_type_id)?;
-            let bound_devices = devices_by_module.get(module.id.as_str()).copied().unwrap_or(0);
+            let bound_devices = devices_by_module
+                .get(module.id.as_str())
+                .copied()
+                .unwrap_or(0);
 
             if matches!(schema.device_binding_mode, DeviceBindingMode::Single) && bound_devices != 1
             {
@@ -236,9 +239,7 @@ impl DeviceRegistry {
     }
 }
 
-fn build_controller(
-    device: &DeviceInstanceConfig,
-) -> Result<Box<dyn DeviceController>, AppError> {
+fn build_controller(device: &DeviceInstanceConfig) -> Result<Box<dyn DeviceController>, AppError> {
     match device.device_type_id.as_str() {
         "core:switch" => Ok(Box::new(SwitchController::new(
             device.id.clone(),
