@@ -1,0 +1,1034 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NKS Home ESP32 Rust Backend Documentation</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --panel: #fffdf8;
+      --ink: #1f2933;
+      --muted: #52606d;
+      --accent: #9b5c2e;
+      --accent-2: #2f6b5f;
+      --border: #d9ccb8;
+      --code: #f1ebe0;
+      --ok: #275d38;
+      --warn: #8a5a00;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(155, 92, 46, 0.08), transparent 30%),
+        radial-gradient(circle at top right, rgba(47, 107, 95, 0.08), transparent 30%),
+        var(--bg);
+      line-height: 1.6;
+    }
+
+    .page {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 32px 20px 80px;
+    }
+
+    .hero, section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 30px rgba(31, 41, 51, 0.05);
+    }
+
+    h1, h2, h3 {
+      line-height: 1.2;
+      margin-top: 0;
+    }
+
+    h1 {
+      font-size: 2.4rem;
+      margin-bottom: 12px;
+    }
+
+    h2 {
+      font-size: 1.55rem;
+      color: var(--accent);
+      margin-bottom: 14px;
+    }
+
+    h3 {
+      font-size: 1.1rem;
+      color: var(--accent-2);
+      margin-bottom: 10px;
+    }
+
+    p, li { font-size: 1rem; }
+
+    .lede {
+      font-size: 1.08rem;
+      color: var(--muted);
+      max-width: 80ch;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      background: linear-gradient(180deg, #fffdf9, #faf5ec);
+    }
+
+    .card strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--accent);
+    }
+
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.92rem;
+    }
+
+    code {
+      background: var(--code);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+
+    pre {
+      overflow-x: auto;
+      padding: 14px;
+      background: var(--code);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 0.96rem;
+    }
+
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--border);
+      padding: 10px 8px;
+    }
+
+    th {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #fff8ef;
+      margin: 3px 6px 3px 0;
+      font-size: 0.88rem;
+    }
+
+    .note {
+      border-left: 4px solid var(--accent-2);
+      padding: 10px 14px;
+      background: #f2faf7;
+      border-radius: 10px;
+      margin: 12px 0;
+    }
+
+    .warn {
+      border-left-color: var(--warn);
+      background: #fff7e8;
+    }
+
+    .ok {
+      border-left-color: var(--ok);
+      background: #effaf1;
+    }
+
+    .toc a {
+      color: var(--accent-2);
+      text-decoration: none;
+    }
+
+    .toc a:hover { text-decoration: underline; }
+
+    .small {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    @media (max-width: 700px) {
+      h1 { font-size: 1.9rem; }
+      section, .hero { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="hero">
+      <h1>NKS Home ESP32 Rust Backend</h1>
+      <p class="lede">
+        This document explains how the current firmware works by reading the Rust source code in
+        <code>src/</code>. It is written for engineers who need to understand boot flow, runtime
+        state, MQTT topics, provisioning, schema registry behavior, resource validation, logical
+        devices, and the public backend contract well enough to build tools or a frontend.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <strong>Entry Point</strong>
+          <span><code>src/main.rs</code> creates the NVS partition and runs <code>AppController</code>.</span>
+        </div>
+        <div class="card">
+          <strong>Main Modes</strong>
+          <span>The firmware runs in <code>Normal</code> mode when Wi-Fi and MQTT config are complete, otherwise in <code>Provisioning</code>.</span>
+        </div>
+        <div class="card">
+          <strong>Public Contract</strong>
+          <span>The frontend should rely on retained config snapshots and public <code>dev/&lt;id&gt;/state</code> and <code>dev/&lt;id&gt;/cmd</code> topics.</span>
+        </div>
+        <div class="card">
+          <strong>Current Runtime Driver</strong>
+          <span>Both built-in module types currently resolve to the same runtime driver: <code>relay_gpio</code>.</span>
+        </div>
+      </div>
+    </div>
+
+    <section class="toc">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#architecture">System Architecture</a></li>
+        <li><a href="#boot-flow">Boot And Runtime Flow</a></li>
+        <li><a href="#runtime-states">Runtime States And LED Indicator</a></li>
+        <li><a href="#config-model">Configuration Model And NVS Storage</a></li>
+        <li><a href="#schema-registry">Schema Registry</a></li>
+        <li><a href="#gpio-modules-devices">GPIO, Modules, And Devices</a></li>
+        <li><a href="#mqtt-contract">MQTT Contract</a></li>
+        <li><a href="#provisioning">Provisioning HTTP API</a></li>
+        <li><a href="#frontend-guide">Frontend Integration Guide</a></li>
+        <li><a href="#source-map">Source Map</a></li>
+      </ol>
+    </section>
+
+    <section id="architecture">
+      <h2>1. System Architecture</h2>
+      <p>
+        The firmware is organized around a strict split between configuration, runtime modules,
+        logical devices, and MQTT contract publishing.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <strong>Board Layer</strong>
+          <span><code>src/board/mod.rs</code> defines the target board profile and GPIO capabilities.</span>
+        </div>
+        <div class="card">
+          <strong>Config Layer</strong>
+          <span><code>src/config/types.rs</code> defines the canonical schema-id-based config model.</span>
+        </div>
+        <div class="card">
+          <strong>Schema Layer</strong>
+          <span><code>src/schemas/*</code> defines built-in module, device, and binding role schemas plus validation rules.</span>
+        </div>
+        <div class="card">
+          <strong>GPIO Layer</strong>
+          <span><code>GpioManager</code> validates bindings, board support, and pin uniqueness, then claims GPIO pins for runtime use.</span>
+        </div>
+        <div class="card">
+          <strong>Module Layer</strong>
+          <span><code>ModuleManager</code> builds runtime module instances from schemas and module config.</span>
+        </div>
+        <div class="card">
+          <strong>Device Layer</strong>
+          <span><code>DeviceRegistry</code> builds logical devices from device config and bridges public device commands/states to runtime modules.</span>
+        </div>
+        <div class="card">
+          <strong>MQTT Layer</strong>
+          <span><code>MqttContract</code> defines topic names, retained config publication, and config command parsing.</span>
+        </div>
+        <div class="card">
+          <strong>Provisioning Layer</strong>
+          <span><code>src/http/mod.rs</code> serves the captive portal and staged Wi-Fi/MQTT test-and-save flow.</span>
+        </div>
+      </div>
+
+      <div class="note ok">
+        The current design intentionally uses schema IDs everywhere in the config contract:
+        <code>module_type_id</code>, <code>device_type_id</code>, and <code>role_id</code>.
+      </div>
+    </section>
+
+    <section id="boot-flow">
+      <h2>2. Boot And Runtime Flow</h2>
+      <h3>Startup Sequence</h3>
+      <ol>
+        <li><code>main()</code> initializes ESP-IDF patches and logging, takes the default NVS partition, and runs <code>AppController</code>.</li>
+        <li><code>AppController::new()</code> creates:
+          the config store, board-specific GPIO manager, built-in schema registry, LED indicator, and runtime state holder.</li>
+        <li><code>AppController::run()</code>:
+          sets the LED to <code>Off</code>,
+          clears hardcoded demo seed config if present,
+          loads and validates resource config,
+          then selects <code>Normal</code> or <code>Provisioning</code> mode.</li>
+      </ol>
+
+      <h3>Boot Mode Decision</h3>
+      <p>
+        <code>detect_boot_mode()</code> in <code>src/app/mod.rs</code> loads the stored config and checks
+        <code>DeviceConfig::is_complete()</code>.
+      </p>
+      <ul>
+        <li><code>Normal</code>: Wi-Fi and MQTT fields are present and non-empty.</li>
+        <li><code>Provisioning</code>: anything missing or incomplete.</li>
+      </ul>
+
+      <h3>Normal Mode Flow</h3>
+      <ol>
+        <li>Load the full stored config and normalize resources.</li>
+        <li>Create ESP peripherals and system event loop.</li>
+        <li>Create Wi-Fi station mode and connect with retry.</li>
+        <li>Build runtime modules from <code>module_instances</code>.</li>
+        <li>Build logical devices from <code>device_instances</code>.</li>
+        <li>Connect to MQTT and subscribe to contract, device, and module command topics.</li>
+        <li>Publish retained birth/config snapshots.</li>
+        <li>Start the local HTTP server used in normal operation.</li>
+        <li>Enter the operational loop.</li>
+      </ol>
+
+      <h3>Operational Loop Responsibilities</h3>
+      <ul>
+        <li>Watch Wi-Fi connectivity and retry if the station link drops.</li>
+        <li>Watch MQTT connectivity and wait/reconnect if the broker session drops.</li>
+        <li>Poll module drivers for timer/input-triggered changes.</li>
+        <li>Publish changed module states on internal <code>mod/...</code> topics.</li>
+        <li>Publish changed logical device states on public <code>dev/.../state</code> topics.</li>
+        <li>Handle incoming MQTT config commands, logical device commands, and internal module commands.</li>
+      </ul>
+
+      <h3>Provisioning Mode Flow</h3>
+      <ol>
+        <li>Start a provisioning access point with a deterministic SSID based on AP MAC address.</li>
+        <li>Scan nearby Wi-Fi networks.</li>
+        <li>Start the captive portal server.</li>
+        <li>Wait for Wi-Fi test requests and MQTT test requests from the provisioning UI.</li>
+        <li>Persist tested Wi-Fi and MQTT config into NVS.</li>
+        <li>Trigger reboot once provisioning is complete.</li>
+      </ol>
+    </section>
+
+    <section id="runtime-states">
+      <h2>3. Runtime States And LED Indicator</h2>
+      <p>
+        Runtime state is represented by <code>RuntimeState</code> in <code>src/runtime/mod.rs</code>.
+        It is made of a status, an optional degraded reason, and an optional current action.
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Field</th>
+            <th>Values</th>
+            <th>Meaning</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>status</code></td>
+            <td><code>Provisioning</code>, <code>Operational</code>, <code>Degraded</code></td>
+            <td>High-level current mode of the controller.</td>
+          </tr>
+          <tr>
+            <td><code>reason</code></td>
+            <td><code>WifiDisconnected</code>, <code>MqttDisconnected</code>, <code>Unknown</code></td>
+            <td>Why the system is degraded.</td>
+          </tr>
+          <tr>
+            <td><code>action</code></td>
+            <td><code>WifiConnecting</code>, <code>MqttConnecting</code>, or none</td>
+            <td>What the runtime is actively trying to do right now.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>State Transitions</h3>
+      <ul>
+        <li><code>set_operational_action()</code>: status is <code>Operational</code> and the runtime is actively connecting.</li>
+        <li><code>set_provisioning_action()</code>: status is <code>Provisioning</code> and the provisioning flow is actively testing Wi-Fi or MQTT.</li>
+        <li><code>set_degraded()</code>: status is <code>Degraded</code> with an explicit reason and optional action.</li>
+      </ul>
+
+      <h3>LED Indicator Behavior</h3>
+      <p>
+        The indicator implementation lives in <code>src/runtime/indicator.rs</code>. It runs in its own
+        thread and watches a shared <code>IndicatorMode</code>.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Condition</th>
+            <th>LED Pattern</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>Off</code></td>
+            <td>LED low</td>
+          </tr>
+          <tr>
+            <td><code>Provisioning</code></td>
+            <td>Blink 120ms on / 120ms off</td>
+          </tr>
+          <tr>
+            <td><code>Operational</code> with no action</td>
+            <td>LED steady on</td>
+          </tr>
+          <tr>
+            <td><code>Operational</code> while connecting Wi-Fi or MQTT</td>
+            <td>Blink 500ms on / 500ms off</td>
+          </tr>
+          <tr>
+            <td><code>Degraded</code> because Wi-Fi is disconnected</td>
+            <td>2 seconds off, then 2 blinks</td>
+          </tr>
+          <tr>
+            <td><code>Degraded</code> because MQTT is disconnected</td>
+            <td>2 seconds off, then 4 blinks</td>
+          </tr>
+          <tr>
+            <td><code>Degraded</code> unknown reason</td>
+            <td>2 seconds off, then 8 blinks</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="config-model">
+      <h2>4. Configuration Model And NVS Storage</h2>
+      <h3>Top-Level Config Objects</h3>
+      <p>
+        The canonical config model is defined in <code>src/config/types.rs</code>.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <strong><code>WifiConfig</code></strong>
+          <span>Station SSID and password.</span>
+        </div>
+        <div class="card">
+          <strong><code>MqttConfig</code></strong>
+          <span>Broker host, port, credentials, MQTT client ID, and base topic.</span>
+        </div>
+        <div class="card">
+          <strong><code>ResourceConfig</code></strong>
+          <span>Schema-based module and device configuration with explicit <code>version</code>.</span>
+        </div>
+        <div class="card">
+          <strong><code>DeviceConfig</code></strong>
+          <span>Container for Wi-Fi, MQTT, and resources.</span>
+        </div>
+      </div>
+
+      <h3>Canonical Resource Model</h3>
+      <pre>{
+  "version": 1,
+  "module_instances": [
+    {
+      "id": "relay1",
+      "module_type_id": "core:gpio_switch",
+      "display_name": "Kitchen Relay",
+      "bindings": [
+        {
+          "role_id": "core:relay_output",
+          "target": { "kind": "gpio", "pin": 4 }
+        }
+      ],
+      "settings": {
+        "auto_off_ms": null,
+        "external_on_triggers": []
+      }
+    }
+  ],
+  "device_instances": [
+    {
+      "id": "relay1__device",
+      "device_type_id": "core:switch",
+      "display_name": "Kitchen Relay",
+      "driver_module_id": "relay1"
+    }
+  ]
+}</pre>
+
+      <h3>NVS Namespaces</h3>
+      <p><code>src/storage/nvs.rs</code> stores config in three namespaces:</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Namespace</th>
+            <th>Purpose</th>
+            <th>Important Keys</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>wifi</code></td>
+            <td>Wi-Fi station config</td>
+            <td><code>ssid</code>, <code>pass</code></td>
+          </tr>
+          <tr>
+            <td><code>mqtt</code></td>
+            <td>MQTT broker config</td>
+            <td><code>host</code>, <code>port</code>, <code>user</code>, <code>pass</code>, <code>cid</code>, <code>topic</code></td>
+          </tr>
+          <tr>
+            <td><code>resources</code></td>
+            <td>Full resource config JSON</td>
+            <td><code>bindings</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="note warn">
+        The backend currently includes a narrow compatibility bridge while deserializing older
+        stored configs. It accepts old field names like <code>module_type</code>,
+        <code>device_type</code>, and <code>role</code>, then maps them into schema IDs.
+      </div>
+    </section>
+
+    <section id="schema-registry">
+      <h2>5. Schema Registry</h2>
+      <p>
+        The schema registry is the source of truth for what module types, device types, and binding
+        roles exist. It lives in <code>src/schemas/registry.rs</code>, with built-ins defined in
+        <code>src/schemas/builtins.rs</code>.
+      </p>
+
+      <h3>Current Built-In Binding Roles</h3>
+      <div class="pill">core:relay_output</div>
+      <div class="pill">core:wall_trigger_input</div>
+      <div class="pill">core:output</div>
+
+      <h3>Current Built-In Module Types</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Display Name</th>
+            <th>Binding Mode</th>
+            <th>Default Device Type</th>
+            <th>Runtime Driver</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>core:gpio_switch</code></td>
+            <td>GPIO Switch</td>
+            <td><code>single</code></td>
+            <td><code>core:switch</code></td>
+            <td><code>relay_gpio</code></td>
+          </tr>
+          <tr>
+            <td><code>core:gpio_output</code></td>
+            <td>GPIO Output</td>
+            <td><code>single</code></td>
+            <td><code>core:switch</code></td>
+            <td><code>relay_gpio</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Current Built-In Device Types</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Display Name</th>
+            <th>Commands</th>
+            <th>State Fields</th>
+            <th>Capabilities</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>core:switch</code></td>
+            <td>Switch</td>
+            <td><code>ON</code>, <code>OFF</code>, <code>TOGGLE</code></td>
+            <td><code>state</code> (string)</td>
+            <td><code>binary_output</code>, <code>retained_state</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>What The Registry Validates</h3>
+      <ul>
+        <li>Every referenced binding role exists.</li>
+        <li>Output binding and optional trigger binding are allowed by the module schema.</li>
+        <li>Every compatible device type exists.</li>
+        <li>A default device type, if present, exists and is compatible with the module schema.</li>
+        <li>A multi-device schema cannot declare a single default device type.</li>
+      </ul>
+
+      <h3>Schema Snapshots Published To MQTT</h3>
+      <p>
+        The registry generates deterministic snapshots for the frontend:
+      </p>
+      <ul>
+        <li><code>module_type_snapshots()</code>: sorted by module type ID.</li>
+        <li><code>device_type_snapshots()</code>: sorted by device type ID.</li>
+      </ul>
+    </section>
+
+    <section id="gpio-modules-devices">
+      <h2>6. GPIO, Modules, And Devices</h2>
+      <h3>Board Layer</h3>
+      <p>
+        <code>BoardProfile::esp32_devkit_v1()</code> in <code>src/board/mod.rs</code> defines the
+        supported pins and their capabilities. Validation never trusts arbitrary GPIO numbers; it
+        checks pin support against this board profile.
+      </p>
+
+      <h3>GPIO Validation</h3>
+      <p><code>GpioManager</code> is responsible for:</p>
+      <ul>
+        <li>ensuring module IDs are unique,</li>
+        <li>ensuring pins are not assigned to multiple modules,</li>
+        <li>ensuring each binding role is allowed by the module schema,</li>
+        <li>ensuring the board supports the requested usage for that pin.</li>
+      </ul>
+
+      <h3>Module Instances</h3>
+      <p>
+        A module instance is a runtime driver configuration record. It is not the user-facing device.
+        It describes:
+      </p>
+      <ul>
+        <li>which module schema to use (<code>module_type_id</code>),</li>
+        <li>which bindings connect schema roles to real GPIO pins,</li>
+        <li>optional display name,</li>
+        <li>driver settings such as <code>auto_off_ms</code> and <code>external_on_triggers</code>.</li>
+      </ul>
+
+      <h3>Logical Devices</h3>
+      <p>
+        A logical device is the public abstraction that the frontend and automation use. It is
+        backed by a runtime module via <code>driver_module_id</code>.
+      </p>
+      <ul>
+        <li>Current built-in modules are all <code>single</code>-binding modules.</li>
+        <li>That means each module instance must resolve to exactly one logical device.</li>
+        <li>If a single-device module has no configured logical device, <code>DeviceRegistry::normalize_config()</code> auto-creates one deterministically.</li>
+      </ul>
+
+      <h3>Auto-Provisioned Logical Devices</h3>
+      <p>
+        For single-device modules, the registry can synthesize:
+      </p>
+      <ul>
+        <li><code>id = &lt;module_id&gt;__device</code></li>
+        <li><code>device_type_id = default_device_type_id</code> from the module schema</li>
+        <li><code>display_name = module display_name</code> or the module ID</li>
+        <li><code>driver_module_id = module.id</code></li>
+      </ul>
+
+      <h3>Runtime Module Loading</h3>
+      <p>
+        <code>ModuleManager::load()</code> resolves each module instance through its schema, claims
+        GPIO pins, extracts the schema-defined output and trigger bindings, and constructs the
+        runtime driver.
+      </p>
+      <div class="note">
+        Right now both <code>core:gpio_switch</code> and <code>core:gpio_output</code> resolve to
+        <code>RelayGpioModule</code>. The difference comes from schema metadata and allowed bindings,
+        not from separate runtime driver implementations.
+      </div>
+
+      <h3>RelayGpioModule Behavior</h3>
+      <p>
+        The only built-in runtime driver today is <code>RelayGpioModule</code>.
+      </p>
+      <ul>
+        <li>It owns one output pin.</li>
+        <li>It may own one optional GPIO trigger input.</li>
+        <li>It tracks binary state <code>On</code> or <code>Off</code>.</li>
+        <li>It supports <code>ON</code>, <code>OFF</code>, and <code>TOGGLE</code>.</li>
+        <li>If <code>auto_off_ms</code> is set, it starts a timer when turned on.</li>
+        <li>If a trigger input is configured, it toggles after debounce.</li>
+        <li>If an external module listed in <code>external_on_triggers</code> turns on, this module toggles.</li>
+      </ul>
+
+      <h3>Module Event Propagation</h3>
+      <p>
+        <code>ModuleManager</code> propagates <code>BinaryStateChanged</code> events across runtime modules.
+        It uses a queue so a change in one module can trigger another module, which can in turn
+        emit more events.
+      </p>
+
+      <h3>Logical Switch Device Behavior</h3>
+      <p>
+        The current logical device controller is <code>SwitchController</code>.
+      </p>
+      <ul>
+        <li>State publication reads the backing module binary state and exposes it as public JSON <code>{ "state": "ON" | "OFF" }</code>.</li>
+        <li>Commands are accepted as either plain text or JSON payloads containing a <code>state</code> field.</li>
+        <li>The controller delegates command execution to the driver module.</li>
+      </ul>
+    </section>
+
+    <section id="mqtt-contract">
+      <h2>7. MQTT Contract</h2>
+      <p>
+        MQTT contract code lives in <code>src/mqtt/contract.rs</code>. The topic root is
+        <code>MqttConfig.base_topic</code>, usually <code>nks/home/&lt;device_id&gt;</code>.
+      </p>
+
+      <h3>Topic Philosophy</h3>
+      <ul>
+        <li><code>dev/...</code> topics are public and frontend-facing.</li>
+        <li><code>mod/...</code> topics are internal/debug/runtime-facing.</li>
+        <li><code>config/...</code> topics are retained snapshots and schema metadata.</li>
+        <li><code>status/...</code> topics describe backend availability and identity.</li>
+      </ul>
+
+      <h3>Retained Status And Config Topics</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Topic</th>
+            <th>Retained</th>
+            <th>Purpose</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>status/availability</code></td>
+            <td>Yes</td>
+            <td><code>{ "state": "online" | "offline" }</code></td>
+          </tr>
+          <tr>
+            <td><code>status/info</code></td>
+            <td>Yes</td>
+            <td>Device identity, board identity, firmware version, protocol version, schema version, supported module types, loaded schema packages.</td>
+          </tr>
+          <tr>
+            <td><code>config/board</code></td>
+            <td>Yes</td>
+            <td>Board info snapshot.</td>
+          </tr>
+          <tr>
+            <td><code>config/resources</code></td>
+            <td>Yes</td>
+            <td>Effective resource/module snapshot including board pin list and binding usage.</td>
+          </tr>
+          <tr>
+            <td><code>config/devices</code></td>
+            <td>Yes</td>
+            <td>Effective logical device list.</td>
+          </tr>
+          <tr>
+            <td><code>config/module_types</code></td>
+            <td>Yes</td>
+            <td>Frontend-facing module type registry snapshot.</td>
+          </tr>
+          <tr>
+            <td><code>config/device_types</code></td>
+            <td>Yes</td>
+            <td>Frontend-facing device type registry snapshot.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Public Device Topics</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Topic</th>
+            <th>Direction</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>dev/&lt;logical_device_id&gt;/state</code></td>
+            <td>Firmware publishes</td>
+            <td>Canonical retained public device state topic.</td>
+          </tr>
+          <tr>
+            <td><code>dev/&lt;logical_device_id&gt;/cmd</code></td>
+            <td>Frontend publishes</td>
+            <td>Canonical public command topic.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Internal Module Topics</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Topic</th>
+            <th>Direction</th>
+            <th>Meaning</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>mod/&lt;module_id&gt;/state</code></td>
+            <td>Firmware publishes</td>
+            <td>Internal runtime module state.</td>
+          </tr>
+          <tr>
+            <td><code>mod/&lt;module_id&gt;/cmd</code></td>
+            <td>Internal/manual publisher sends</td>
+            <td>Internal runtime module command path.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Config Command Topics</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Topic</th>
+            <th>Request</th>
+            <th>Effect</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>cmd/get_config</code></td>
+            <td><code>{ "request_id": "..." }</code> or empty object</td>
+            <td>Re-publishes the retained config/state snapshots.</td>
+          </tr>
+          <tr>
+            <td><code>cmd/validate_resources</code></td>
+            <td><code>{ "request_id": "...", "resources": ... }</code></td>
+            <td>Validates the proposed resource config and returns <code>evt/config_result</code>.</td>
+          </tr>
+          <tr>
+            <td><code>cmd/set_resources</code></td>
+            <td><code>{ "request_id": "...", "resources": ... }</code></td>
+            <td>Normalizes, validates, saves, reloads runtime, and republishes retained snapshots.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Config Result Topic</h3>
+      <p>
+        <code>evt/config_result</code> is non-retained and carries:
+      </p>
+      <pre>{
+  "request_id": "optional-correlation-id",
+  "command": "validate_resources | set_resources | get_config | unknown",
+  "ok": true,
+  "message": "Human-readable message"
+}</pre>
+
+      <h3>Public Device State Payload</h3>
+      <pre>{
+  "state": "ON"
+}</pre>
+
+      <h3>Public Switch Command Payloads</h3>
+      <p>Accepted forms:</p>
+      <pre>ON
+OFF
+TOGGLE</pre>
+      <pre>{
+  "state": "ON"
+}</pre>
+    </section>
+
+    <section id="provisioning">
+      <h2>8. Provisioning HTTP API</h2>
+      <p>
+        Provisioning is implemented in <code>src/http/mod.rs</code>. It is a staged flow:
+      </p>
+      <ol>
+        <li>Serve the provisioning UI and a cached Wi-Fi scan list.</li>
+        <li>Test Wi-Fi credentials before saving them.</li>
+        <li>Test MQTT broker settings before saving them.</li>
+        <li>Save confirmed settings and reboot.</li>
+      </ol>
+
+      <h3>Main Endpoints</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Path</th>
+            <th>Method</th>
+            <th>Purpose</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>/api/provisioning/status</code></td>
+            <td>GET</td>
+            <td>Returns AP SSID.</td>
+          </tr>
+          <tr>
+            <td><code>/api/networks</code></td>
+            <td>GET</td>
+            <td>Returns cached Wi-Fi scan results.</td>
+          </tr>
+          <tr>
+            <td><code>/api/test-wifi</code></td>
+            <td>POST</td>
+            <td>Schedules Wi-Fi connectivity test.</td>
+          </tr>
+          <tr>
+            <td><code>/api/wifi-status</code></td>
+            <td>GET</td>
+            <td>Returns Wi-Fi test status.</td>
+          </tr>
+          <tr>
+            <td><code>/api/save-wifi</code></td>
+            <td>POST</td>
+            <td>Saves tested Wi-Fi credentials.</td>
+          </tr>
+          <tr>
+            <td><code>/api/test-mqtt</code></td>
+            <td>POST</td>
+            <td>Schedules MQTT broker test.</td>
+          </tr>
+          <tr>
+            <td><code>/api/mqtt-status</code></td>
+            <td>GET</td>
+            <td>Returns MQTT test status.</td>
+          </tr>
+          <tr>
+            <td><code>/api/save-mqtt</code></td>
+            <td>POST</td>
+            <td>Saves tested MQTT config and schedules restart.</td>
+          </tr>
+          <tr>
+            <td><code>/api/reset-configuration</code></td>
+            <td>POST</td>
+            <td>Clears NVS config and reboots.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Provisioning State Tracking</h3>
+      <p>
+        The provisioning controller keeps staged data in memory:
+      </p>
+      <ul>
+        <li>pending Wi-Fi test, last successful Wi-Fi test, Wi-Fi test status</li>
+        <li>pending MQTT test, last successful MQTT test, MQTT test status</li>
+        <li>AP SSID and cached scanned networks</li>
+      </ul>
+      <p>
+        Save operations only succeed if the payload exactly matches the last successful test result.
+      </p>
+    </section>
+
+    <section id="frontend-guide">
+      <h2>9. Frontend Integration Guide</h2>
+      <h3>What The Frontend Should Treat As Stable</h3>
+      <ul>
+        <li><code>status/info</code></li>
+        <li><code>config/board</code></li>
+        <li><code>config/resources</code></li>
+        <li><code>config/devices</code></li>
+        <li><code>config/module_types</code></li>
+        <li><code>config/device_types</code></li>
+        <li><code>dev/&lt;id&gt;/state</code></li>
+        <li><code>dev/&lt;id&gt;/cmd</code></li>
+        <li><code>cmd/get_config</code>, <code>cmd/validate_resources</code>, <code>cmd/set_resources</code></li>
+        <li><code>evt/config_result</code></li>
+      </ul>
+
+      <h3>What The Frontend Should Not Depend On As Public API</h3>
+      <ul>
+        <li><code>mod/&lt;module_id&gt;/state</code></li>
+        <li><code>mod/&lt;module_id&gt;/cmd</code></li>
+        <li>driver names such as <code>relay_gpio</code></li>
+        <li>ESP-specific Wi-Fi or provisioning internals</li>
+      </ul>
+
+      <h3>Suggested Frontend Data Model</h3>
+      <ol>
+        <li>Load retained snapshots on connect by subscribing to the full base topic subtree or by calling <code>cmd/get_config</code>.</li>
+        <li>Build module-type forms from <code>config/module_types</code>.</li>
+        <li>Build device-type UI and rule/automation menus from <code>config/device_types</code>.</li>
+        <li>Render configured modules from <code>config/resources.module_instances</code>.</li>
+        <li>Render public user-facing devices from <code>config/devices.device_instances</code>.</li>
+        <li>Render live logical device state from <code>dev/&lt;id&gt;/state</code>.</li>
+      </ol>
+
+      <h3>Important Frontend Assumptions That Are Safe Today</h3>
+      <ul>
+        <li>Current built-in modules are single-channel and single-device.</li>
+        <li>Logical devices map to modules through <code>driver_module_id</code>.</li>
+        <li>Current switch-style devices expose one state field: <code>state</code>.</li>
+        <li>Switch commands are <code>ON</code>, <code>OFF</code>, and <code>TOGGLE</code>.</li>
+      </ul>
+
+      <h3>How To Create Or Update Resources From A Frontend</h3>
+      <ol>
+        <li>Construct a full <code>ResourceConfig</code> payload with <code>version</code>, <code>module_instances</code>, and optional explicit <code>device_instances</code>.</li>
+        <li>Publish it to <code>cmd/validate_resources</code>.</li>
+        <li>Wait for <code>evt/config_result</code> with <code>ok = true</code>.</li>
+        <li>Publish the same payload to <code>cmd/set_resources</code>.</li>
+        <li>Refresh from retained config topics after success.</li>
+      </ol>
+
+      <div class="note">
+        You do not have to explicitly create <code>device_instances</code> for built-in single-device
+        modules if you are comfortable with the backend's deterministic auto-provisioning behavior.
+        The backend will synthesize them when missing.
+      </div>
+    </section>
+
+    <section id="source-map">
+      <h2>10. Source Map</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Role</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>src/main.rs</code></td><td>Application entry point</td></tr>
+          <tr><td><code>src/app/mod.rs</code></td><td>Boot mode selection</td></tr>
+          <tr><td><code>src/runtime/mod.rs</code></td><td>Main application controller and runtime loops</td></tr>
+          <tr><td><code>src/runtime/indicator.rs</code></td><td>LED status indicator thread and patterns</td></tr>
+          <tr><td><code>src/config/types.rs</code></td><td>Canonical config model</td></tr>
+          <tr><td><code>src/storage/nvs.rs</code></td><td>NVS persistence</td></tr>
+          <tr><td><code>src/schemas/builtins.rs</code></td><td>Built-in schemas</td></tr>
+          <tr><td><code>src/schemas/registry.rs</code></td><td>Schema lookup and snapshot publishing data</td></tr>
+          <tr><td><code>src/schemas/validate.rs</code></td><td>Schema-based validation</td></tr>
+          <tr><td><code>src/board/mod.rs</code></td><td>Board profile and GPIO capabilities</td></tr>
+          <tr><td><code>src/gpio/mod.rs</code></td><td>GPIO validation, claiming, and snapshots</td></tr>
+          <tr><td><code>src/modules/manager.rs</code></td><td>Runtime module loading and event propagation</td></tr>
+          <tr><td><code>src/modules/relay_gpio.rs</code></td><td>Built-in GPIO relay runtime driver</td></tr>
+          <tr><td><code>src/devices/registry.rs</code></td><td>Logical device normalization, validation, and publishing</td></tr>
+          <tr><td><code>src/devices/switch.rs</code></td><td>Public switch logical device controller</td></tr>
+          <tr><td><code>src/mqtt/mod.rs</code></td><td>MQTT client wrapper</td></tr>
+          <tr><td><code>src/mqtt/contract.rs</code></td><td>MQTT topic contract and config command parsing</td></tr>
+          <tr><td><code>src/http/mod.rs</code></td><td>Provisioning and normal HTTP endpoints</td></tr>
+          <tr><td><code>src/wifi/mod.rs</code></td><td>Wi-Fi station and provisioning AP helpers</td></tr>
+          <tr><td><code>src/error.rs</code></td><td>Application error type</td></tr>
+        </tbody>
+      </table>
+
+      <p class="small">
+        This document reflects the current codebase state in the repository at the time it was
+        generated. If module schemas, device types, or MQTT topics change later, update this file
+        alongside the code so it remains useful to the next engineer.
+      </p>
+    </section>
+  </div>
+</body>
+</html>
