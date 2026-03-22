@@ -5,13 +5,14 @@ use serde::Serialize;
 
 use crate::board::{BoardProfile, BoardProfileSnapshot};
 use crate::config::types::{
-    ModuleInstanceConfig, ModuleRole, ModuleSettings, ModuleType, PinBindingConfig, ResourceConfig,
-    ResourceUsage,
+    ModuleInstanceConfig, ModuleSettings, PinBindingConfig, ResourceConfig, ResourceUsage,
 };
 use crate::error::AppError;
+use crate::schemas::{validate, SchemaRegistry};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ResourceConfigSnapshot {
+    pub version: u32,
     pub board: BoardProfileSnapshot,
     pub module_instances: Vec<ModuleInstanceSnapshot>,
 }
@@ -19,7 +20,7 @@ pub struct ResourceConfigSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct ModuleInstanceSnapshot {
     pub id: String,
-    pub module_type: ModuleType,
+    pub module_type_id: String,
     pub display_name: Option<String>,
     pub settings: ModuleSettings,
     pub bindings: Vec<PinBindingSnapshot>,
@@ -27,7 +28,7 @@ pub struct ModuleInstanceSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PinBindingSnapshot {
-    pub role: ModuleRole,
+    pub role_id: String,
     pub pin: u8,
     pub usage: ResourceUsage,
 }
@@ -35,14 +36,13 @@ pub struct PinBindingSnapshot {
 #[derive(Debug, Clone)]
 pub struct ClaimedModulePins {
     module_id: String,
-    pins_by_role: HashMap<ModuleRole, u8>,
+    pins_by_role_id: HashMap<String, u8>,
 }
 
 #[derive(Debug, Clone)]
 struct RuntimeClaim {
     module_id: String,
-    module_type: ModuleType,
-    role: ModuleRole,
+    role_id: String,
 }
 
 pub struct GpioManager {
@@ -58,7 +58,11 @@ impl GpioManager {
         }
     }
 
-    pub fn validate_config(&self, config: &ResourceConfig) -> Result<(), AppError> {
+    pub fn validate_config(
+        &self,
+        config: &ResourceConfig,
+        schemas: &SchemaRegistry,
+    ) -> Result<(), AppError> {
         let mut seen_module_ids = HashSet::new();
         let mut seen_pins = HashMap::<u8, String>::new();
 
@@ -76,7 +80,7 @@ impl GpioManager {
                 )));
             }
 
-            self.validate_module(module)?;
+            self.validate_module(module, schemas)?;
 
             for binding in &module.bindings {
                 let pin = binding.pin()?;
@@ -95,8 +99,9 @@ impl GpioManager {
     pub fn claim_module_instance(
         &mut self,
         config: &ModuleInstanceConfig,
+        schemas: &SchemaRegistry,
     ) -> Result<ClaimedModulePins, AppError> {
-        self.validate_module(config)?;
+        self.validate_module(config, schemas)?;
 
         let mut claimed = HashMap::new();
 
@@ -105,8 +110,8 @@ impl GpioManager {
 
             if let Some(existing) = self.claims.get(&pin) {
                 return Err(AppError::Message(format!(
-                    "GPIO{pin} is already claimed by module '{}' role {:?}",
-                    existing.module_id, existing.role
+                    "GPIO{pin} is already claimed by module '{}' role {}",
+                    existing.module_id, existing.role_id
                 )));
             }
 
@@ -114,18 +119,17 @@ impl GpioManager {
                 pin,
                 RuntimeClaim {
                     module_id: config.id.clone(),
-                    module_type: config.module_type,
-                    role: binding.role,
+                    role_id: binding.role_id.clone(),
                 },
             );
-            claimed.insert(binding.role, pin);
+            claimed.insert(binding.role_id.clone(), pin);
         }
 
         info!("Claimed GPIO bindings for module '{}'", config.id);
 
         Ok(ClaimedModulePins {
             module_id: config.id.clone(),
-            pins_by_role: claimed,
+            pins_by_role_id: claimed,
         })
     }
 
@@ -133,15 +137,20 @@ impl GpioManager {
         self.claims.retain(|_, claim| claim.module_id != module_id);
     }
 
-    pub fn snapshot(&self, config: &ResourceConfig) -> ResourceConfigSnapshot {
+    pub fn snapshot(
+        &self,
+        config: &ResourceConfig,
+        schemas: &SchemaRegistry,
+    ) -> ResourceConfigSnapshot {
         ResourceConfigSnapshot {
+            version: config.version,
             board: self.board.snapshot(),
             module_instances: config
                 .module_instances
                 .iter()
                 .map(|instance| ModuleInstanceSnapshot {
                     id: instance.id.clone(),
-                    module_type: instance.module_type,
+                    module_type_id: instance.module_type_id.clone(),
                     display_name: instance.display_name.clone(),
                     settings: instance.settings.clone(),
                     bindings: instance
@@ -149,9 +158,12 @@ impl GpioManager {
                         .iter()
                         .filter_map(|binding| {
                             binding.pin().ok().map(|pin| PinBindingSnapshot {
-                                role: binding.role,
+                                role_id: binding.role_id.clone(),
                                 pin,
-                                usage: binding.role.usage(),
+                                usage: schemas
+                                    .lookup_binding_role(&binding.role_id)
+                                    .map(|role| role.resource_usage)
+                                    .unwrap_or(ResourceUsage::Output),
                             })
                         })
                         .collect(),
@@ -160,28 +172,23 @@ impl GpioManager {
         }
     }
 
-    fn validate_module(&self, module: &ModuleInstanceConfig) -> Result<(), AppError> {
-        let required_roles = module.module_type.required_roles();
+    fn validate_module(
+        &self,
+        module: &ModuleInstanceConfig,
+        schemas: &SchemaRegistry,
+    ) -> Result<(), AppError> {
+        validate::validate_module_instance(schemas, module)?;
         let mut seen_roles = HashSet::new();
 
         for binding in &module.bindings {
-            if !seen_roles.insert(binding.role) {
+            if !seen_roles.insert(binding.role_id.as_str()) {
                 return Err(AppError::Message(format!(
-                    "Module '{}' defines role {:?} more than once",
-                    module.id, binding.role
+                    "Module '{}' defines role '{}' more than once",
+                    module.id, binding.role_id
                 )));
             }
 
-            self.validate_binding(module, binding)?;
-        }
-
-        for role in required_roles {
-            if !seen_roles.contains(&role) {
-                return Err(AppError::Message(format!(
-                    "Module '{}' is missing required role {:?}",
-                    module.id, role
-                )));
-            }
+            self.validate_binding(module, binding, schemas)?;
         }
 
         Ok(())
@@ -191,14 +198,17 @@ impl GpioManager {
         &self,
         module: &ModuleInstanceConfig,
         binding: &PinBindingConfig,
+        schemas: &SchemaRegistry,
     ) -> Result<(), AppError> {
         let pin = binding.pin()?;
-        let usage = binding.role.usage();
+        let usage = schemas
+            .lookup_binding_role_required(&binding.role_id)?
+            .resource_usage;
 
         if !self.board.supports(pin, usage) {
             return Err(AppError::Message(format!(
-                "GPIO{pin} does not support {:?} for module '{}' role {:?}",
-                usage, module.id, binding.role
+                "GPIO{pin} does not support {:?} for module '{}' role '{}'",
+                usage, module.id, binding.role_id
             )));
         }
 
@@ -211,7 +221,7 @@ impl ClaimedModulePins {
         &self.module_id
     }
 
-    pub fn pin_for(&self, role: ModuleRole) -> Option<u8> {
-        self.pins_by_role.get(&role).copied()
+    pub fn pin_for_schema_role(&self, role_id: &str) -> Option<u8> {
+        self.pins_by_role_id.get(role_id).copied()
     }
 }

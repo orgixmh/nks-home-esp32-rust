@@ -32,6 +32,12 @@ pub struct BoardProfileSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BoardInfoSnapshot {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct BoardGpioPinSnapshot {
     pub number: u8,
     pub label: String,
@@ -79,6 +85,22 @@ impl BoardProfile {
                     pull_down: pin.capabilities.pull_down,
                 })
                 .collect(),
+        }
+    }
+
+    pub fn info_snapshot(&self) -> BoardInfoSnapshot {
+        BoardInfoSnapshot {
+            id: self.id.to_string(),
+            name: self.name.to_string(),
+        }
+    }
+}
+
+impl BoardProfileSnapshot {
+    pub fn info_snapshot(&self) -> BoardInfoSnapshot {
+        BoardInfoSnapshot {
+            id: self.id.clone(),
+            name: self.name.clone(),
         }
     }
 }

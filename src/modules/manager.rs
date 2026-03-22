@@ -1,11 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
-use crate::config::types::{ModuleRole, ModuleType, ResourceConfig};
+use crate::config::types::ResourceConfig;
 use crate::error::AppError;
 use crate::gpio::GpioManager;
 use crate::mqtt::contract::MqttTopics;
 use crate::mqtt::MqttManager;
+use crate::schemas::SchemaRegistry;
 
 use super::events::ModuleExecution;
 use super::relay_gpio::RelayGpioModule;
@@ -23,22 +24,31 @@ impl ModuleManager {
         }
     }
 
-    pub fn load(config: &ResourceConfig, gpio_manager: &mut GpioManager) -> Result<Self, AppError> {
+    pub fn load(
+        config: &ResourceConfig,
+        gpio_manager: &mut GpioManager,
+        schemas: &SchemaRegistry,
+    ) -> Result<Self, AppError> {
         let mut modules: HashMap<String, Box<dyn Module>> = HashMap::new();
 
         for instance in &config.module_instances {
-            match instance.module_type {
-                ModuleType::Switch | ModuleType::GpioOutput => {
-                    let claimed = gpio_manager.claim_module_instance(instance)?;
-                    let output_role = output_role_for(instance.module_type);
-                    let output_pin = claimed.pin_for(output_role).ok_or_else(|| {
-                        AppError::Message(format!(
-                            "Module '{}' is missing claimed output pin",
-                            claimed.module_id()
-                        ))
-                    })?;
-                    let trigger_pin = claimed.pin_for(ModuleRole::WallTriggerInput);
+            let schema = schemas.lookup_module_type_required(&instance.module_type_id)?;
+            let claimed = gpio_manager.claim_module_instance(instance, schemas)?;
+            let output_pin = claimed
+                .pin_for_schema_role(schema.output_binding)
+                .ok_or_else(|| {
+                    AppError::Message(format!(
+                        "Module '{}' is missing claimed output pin '{}'",
+                        claimed.module_id(),
+                        schema.output_binding
+                    ))
+                })?;
+            let trigger_pin = schema
+                .trigger_input_binding
+                .and_then(|binding_id| claimed.pin_for_schema_role(binding_id));
 
+            match schema.runtime_driver {
+                "relay_gpio" => {
                     modules.insert(
                         instance.id.clone(),
                         Box::new(RelayGpioModule::new(
@@ -48,6 +58,12 @@ impl ModuleManager {
                             trigger_pin,
                         )?),
                     );
+                }
+                other => {
+                    return Err(AppError::Message(format!(
+                        "Unsupported runtime driver '{}' for module '{}'",
+                        other, instance.id
+                    )))
                 }
             }
         }
@@ -181,12 +197,5 @@ impl ModuleManager {
         }
 
         Ok(changed)
-    }
-}
-
-fn output_role_for(module_type: ModuleType) -> ModuleRole {
-    match module_type {
-        ModuleType::Switch => ModuleRole::RelayOutput,
-        ModuleType::GpioOutput => ModuleRole::Output,
     }
 }

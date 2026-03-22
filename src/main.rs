@@ -8,6 +8,7 @@ mod http;
 mod modules;
 mod mqtt;
 mod runtime;
+mod schemas;
 mod storage;
 mod wifi;
 

@@ -2,11 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::config::types::{DeviceType, ModuleType, ResourceConfig};
+use crate::config::types::{DeviceInstanceConfig, ResourceConfig};
 use crate::error::AppError;
 use crate::modules::ModuleManager;
 use crate::mqtt::contract::MqttTopics;
 use crate::mqtt::MqttManager;
+use crate::schemas::types::{DeviceBindingMode, DeviceTypeSchemaSnapshot};
+use crate::schemas::{validate, SchemaRegistry};
 
 use super::switch::SwitchController;
 use super::traits::{DeviceCommand, DeviceController};
@@ -19,17 +21,9 @@ pub struct DeviceConfigSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceInstanceSnapshot {
     pub id: String,
-    pub device_type: DeviceType,
+    pub device_type_id: String,
     pub display_name: Option<String>,
     pub driver_module_id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DeviceTypeSchemaSnapshot {
-    pub device_type: DeviceType,
-    pub commands: Vec<String>,
-    pub state_fields: Vec<String>,
-    pub capabilities: Vec<String>,
 }
 
 pub struct DeviceRegistry {
@@ -45,14 +39,69 @@ impl DeviceRegistry {
         }
     }
 
-    pub fn validate_config(config: &ResourceConfig) -> Result<(), AppError> {
-        let module_types = config
-            .module_instances
+    pub fn normalize_config(
+        config: &ResourceConfig,
+        schemas: &SchemaRegistry,
+    ) -> Result<(ResourceConfig, bool), AppError> {
+        let mut normalized = config.clone();
+        let mut existing_driver_modules = normalized
+            .device_instances
             .iter()
-            .map(|module| (module.id.as_str(), module.module_type))
-            .collect::<HashMap<_, _>>();
+            .map(|device| device.driver_module_id.clone())
+            .collect::<HashSet<_>>();
+        let mut existing_device_ids = normalized
+            .device_instances
+            .iter()
+            .map(|device| device.id.clone())
+            .collect::<HashSet<_>>();
+        let mut changed = false;
+        let module_instances = normalized.module_instances.clone();
+
+        for module in &module_instances {
+            let schema = schemas.lookup_module_type_required(&module.module_type_id)?;
+            if !matches!(schema.device_binding_mode, DeviceBindingMode::Single) {
+                continue;
+            }
+
+            if existing_driver_modules.contains(&module.id) {
+                continue;
+            }
+
+            let Some(default_device_type_id) = schema.default_device_type_id else {
+                continue;
+            };
+
+            let default_device_id = format!("{}__device", module.id);
+            if existing_device_ids.contains(&default_device_id) {
+                return Err(AppError::Message(format!(
+                    "Cannot auto-provision device for module '{}' because device id '{}' is already in use",
+                    module.id, default_device_id
+                )));
+            }
+
+            normalized.device_instances.push(DeviceInstanceConfig {
+                id: default_device_id.clone(),
+                device_type_id: default_device_type_id.to_string(),
+                display_name: module
+                    .display_name
+                    .clone()
+                    .or_else(|| Some(module.id.clone())),
+                driver_module_id: module.id.clone(),
+            });
+            existing_driver_modules.insert(module.id.clone());
+            existing_device_ids.insert(default_device_id);
+            changed = true;
+        }
+
+        Ok((normalized, changed))
+    }
+
+    pub fn validate_config(
+        config: &ResourceConfig,
+        schemas: &SchemaRegistry,
+    ) -> Result<(), AppError> {
         let mut device_ids = HashSet::new();
-        let mut driver_modules = HashSet::new();
+        let mut devices_by_module = HashMap::<&str, usize>::new();
 
         for device in &config.device_instances {
             if device.id.trim().is_empty() {
@@ -68,41 +117,37 @@ impl DeviceRegistry {
                 )));
             }
 
-            let Some(module_type) = module_types.get(device.driver_module_id.as_str()) else {
-                return Err(AppError::Message(format!(
-                    "Device '{}' references unknown driver module '{}'",
-                    device.id, device.driver_module_id
-                )));
-            };
+            *devices_by_module
+                .entry(device.driver_module_id.as_str())
+                .or_insert(0) += 1;
 
-            if !driver_modules.insert(device.driver_module_id.clone()) {
-                return Err(AppError::Message(format!(
-                    "Driver module '{}' is assigned to more than one logical device",
-                    device.driver_module_id
-                )));
-            }
+            validate::validate_device_instance(schemas, config, device)?;
+        }
 
-            match (device.device_type, module_type) {
-                (DeviceType::Switch, ModuleType::Switch | ModuleType::GpioOutput) => {}
+        for module in &config.module_instances {
+            let schema = schemas.lookup_module_type_required(&module.module_type_id)?;
+            let bound_devices = devices_by_module.get(module.id.as_str()).copied().unwrap_or(0);
+
+            if matches!(schema.device_binding_mode, DeviceBindingMode::Single) && bound_devices != 1
+            {
+                return Err(AppError::Message(format!(
+                    "Module '{}' requires exactly one logical device, found {}",
+                    module.id, bound_devices
+                )));
             }
         }
 
         Ok(())
     }
 
-    pub fn load(config: &ResourceConfig) -> Result<Self, AppError> {
-        Self::validate_config(config)?;
+    pub fn load(config: &ResourceConfig, schemas: &SchemaRegistry) -> Result<Self, AppError> {
+        Self::validate_config(config, schemas)?;
 
         let mut devices: HashMap<String, Box<dyn DeviceController>> = HashMap::new();
         let mut module_to_devices: HashMap<String, Vec<String>> = HashMap::new();
 
         for device in &config.device_instances {
-            let controller: Box<dyn DeviceController> = match device.device_type {
-                DeviceType::Switch => Box::new(SwitchController::new(
-                    device.id.clone(),
-                    device.driver_module_id.clone(),
-                )),
-            };
+            let controller = build_controller(device)?;
 
             module_to_devices
                 .entry(controller.driver_module_id().to_string())
@@ -124,7 +169,7 @@ impl DeviceRegistry {
                 .iter()
                 .map(|device| DeviceInstanceSnapshot {
                     id: device.id.clone(),
-                    device_type: device.device_type,
+                    device_type_id: device.device_type_id.clone(),
                     display_name: device.display_name.clone(),
                     driver_module_id: device.driver_module_id.clone(),
                 })
@@ -132,13 +177,8 @@ impl DeviceRegistry {
         }
     }
 
-    pub fn type_schemas(&self) -> Vec<DeviceTypeSchemaSnapshot> {
-        vec![DeviceTypeSchemaSnapshot {
-            device_type: DeviceType::Switch,
-            commands: vec!["ON".into(), "OFF".into(), "TOGGLE".into()],
-            state_fields: vec!["state".into()],
-            capabilities: vec!["binary_output".into(), "retained_state".into()],
-        }]
+    pub fn type_schemas(&self, schemas: &SchemaRegistry) -> Vec<DeviceTypeSchemaSnapshot> {
+        schemas.device_type_snapshots()
     }
 
     pub fn publish_initial_states(
@@ -193,5 +233,20 @@ impl DeviceRegistry {
         }
 
         Ok(())
+    }
+}
+
+fn build_controller(
+    device: &DeviceInstanceConfig,
+) -> Result<Box<dyn DeviceController>, AppError> {
+    match device.device_type_id.as_str() {
+        "core:switch" => Ok(Box::new(SwitchController::new(
+            device.id.clone(),
+            device.driver_module_id.clone(),
+        ))),
+        other => Err(AppError::Message(format!(
+            "Unsupported device controller type '{}'",
+            other
+        ))),
     }
 }

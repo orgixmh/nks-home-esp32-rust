@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::board::BoardProfile;
+use crate::board::{BoardInfoSnapshot, BoardProfile};
 use crate::config::types::{MqttConfig, ResourceConfig};
-use crate::devices::{DeviceConfigSnapshot, DeviceTypeSchemaSnapshot};
+use crate::devices::DeviceConfigSnapshot;
 use crate::error::AppError;
 use crate::gpio::ResourceConfigSnapshot;
 use crate::mqtt::{MqttLastWill, MqttManager, MqttMessage, QoS};
+use crate::schemas::types::{DeviceTypeSchemaSnapshot, ModuleTypeSchemaSnapshot};
+use crate::schemas::SchemaRegistry;
 
 #[derive(Debug, Clone)]
 pub struct MqttTopics {
@@ -25,6 +27,15 @@ pub struct DeviceInfoPayload {
     pub board_name: String,
     pub firmware_version: String,
     pub topic_root: String,
+    pub protocol_version: String,
+    pub schema_registry_version: String,
+    pub loaded_schema_packages: Vec<String>,
+    pub supported_module_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BoardConfigPayload {
+    pub board: BoardInfoSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +110,10 @@ impl MqttTopics {
         format!("{}/config/devices", self.base_topic)
     }
 
+    pub fn module_types_config(&self) -> String {
+        format!("{}/config/module_types", self.base_topic)
+    }
+
     pub fn device_types_config(&self) -> String {
         format!("{}/config/device_types", self.base_topic)
     }
@@ -119,6 +134,7 @@ impl MqttTopics {
         format!("{}/cmd/#", self.base_topic)
     }
 
+    // `mod/...` topics are retained for internal runtime/debug visibility.
     pub fn module_command(&self, module_id: &str) -> String {
         format!("{}/mod/{module_id}/cmd", self.base_topic)
     }
@@ -131,10 +147,12 @@ impl MqttTopics {
         format!("{}/mod/+/cmd", self.base_topic)
     }
 
+    // `dev/.../cmd` is the canonical public command topic for logical devices.
     pub fn device_command(&self, device_id: &str) -> String {
         format!("{}/dev/{device_id}/cmd", self.base_topic)
     }
 
+    // `dev/.../state` is the canonical public retained state topic for logical devices.
     pub fn device_state(&self, device_id: &str) -> String {
         format!("{}/dev/{device_id}/state", self.base_topic)
     }
@@ -177,7 +195,7 @@ impl MqttTopics {
 }
 
 impl MqttContract {
-    pub fn new(mqtt: &MqttConfig, board: &'static BoardProfile) -> Self {
+    pub fn new(mqtt: &MqttConfig, board: &'static BoardProfile, schemas: &SchemaRegistry) -> Self {
         let topics = MqttTopics::new(mqtt.base_topic.clone());
         let info = DeviceInfoPayload {
             device_id: mqtt.client_id.clone(),
@@ -186,6 +204,10 @@ impl MqttContract {
             board_name: board.name.to_string(),
             firmware_version: env!("CARGO_PKG_VERSION").to_string(),
             topic_root: mqtt.base_topic.clone(),
+            protocol_version: schemas.protocol_version().to_string(),
+            schema_registry_version: schemas.schema_registry_version().to_string(),
+            loaded_schema_packages: schemas.loaded_schema_packages(),
+            supported_module_types: schemas.supported_module_types(),
         };
 
         Self { topics, info }
@@ -209,6 +231,7 @@ impl MqttContract {
         mqtt: &mut MqttManager,
         resources: &ResourceConfigSnapshot,
         devices: &DeviceConfigSnapshot,
+        module_types: &[ModuleTypeSchemaSnapshot],
         device_types: &[DeviceTypeSchemaSnapshot],
     ) -> Result<(), AppError> {
         mqtt.publish_json(
@@ -220,7 +243,9 @@ impl MqttContract {
         mqtt.publish_json(&self.topics.info(), &self.info, QoS::AtLeastOnce, true)?;
         mqtt.publish_json(
             &self.topics.board_config(),
-            &resources.board,
+            &BoardConfigPayload {
+                board: resources.board.info_snapshot(),
+            },
             QoS::AtLeastOnce,
             true,
         )?;
@@ -233,6 +258,12 @@ impl MqttContract {
         mqtt.publish_json(
             &self.topics.devices_config(),
             devices,
+            QoS::AtLeastOnce,
+            true,
+        )?;
+        mqtt.publish_json(
+            &self.topics.module_types_config(),
+            &module_types,
             QoS::AtLeastOnce,
             true,
         )?;

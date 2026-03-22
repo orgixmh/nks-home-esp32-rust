@@ -14,6 +14,7 @@ use log::{error, info, warn};
 
 use crate::app::{detect_boot_mode, BootMode};
 use crate::board::BoardProfile;
+use crate::config::types::ResourceConfig;
 use crate::devices::{DeviceCommand, DeviceRegistry};
 use crate::error::AppError;
 use crate::gpio::GpioManager;
@@ -22,6 +23,7 @@ use crate::modules::{ModuleCommand, ModuleManager};
 use crate::mqtt;
 use crate::mqtt::contract::{ConfigOperationResultPayload, ContractAction, MqttContract};
 use crate::runtime::indicator::{IndicatorMode, LedIndicator};
+use crate::schemas::SchemaRegistry;
 use crate::storage::nvs::ConfigStore;
 use crate::wifi;
 
@@ -73,6 +75,7 @@ pub struct AppController {
     nvs: EspDefaultNvsPartition,
     store: ConfigStore,
     gpio_manager: GpioManager,
+    schema_registry: SchemaRegistry,
     led_indicator: LedIndicator,
     wifi_retry_at: Option<Instant>,
     mqtt_retry_at: Option<Instant>,
@@ -98,6 +101,7 @@ impl AppController {
             nvs,
             store,
             gpio_manager: GpioManager::new(BoardProfile::esp32_devkit_v1()),
+            schema_registry: SchemaRegistry::built_in().expect("failed to initialize schemas"),
             led_indicator: LedIndicator::new_onboard().expect("failed to initialize onboard LED"),
             wifi_retry_at: None,
             mqtt_retry_at: None,
@@ -106,7 +110,8 @@ impl AppController {
 
     pub fn run(mut self) -> Result<(), AppError> {
         self.led_indicator.set_mode(IndicatorMode::Off);
-        self.clear_legacy_demo_config()?;
+        self.led_indicator.tick();
+        self.clear_demo_seed_config()?;
         self.initialize_resource_runtime()?;
 
         match detect_boot_mode(&self.store)? {
@@ -115,10 +120,10 @@ impl AppController {
         }
     }
 
-    fn clear_legacy_demo_config(&self) -> Result<(), AppError> {
+    fn clear_demo_seed_config(&self) -> Result<(), AppError> {
         if let Some(cfg) = self.store.load()? {
-            if cfg.is_legacy_demo_seed() {
-                info!("Removing legacy demo config from NVS");
+            if cfg.is_demo_seed_config() {
+                info!("Removing demo seed config from NVS");
                 self.store.clear_all()?;
             }
         }
@@ -127,14 +132,16 @@ impl AppController {
     }
 
     fn initialize_resource_runtime(&mut self) -> Result<(), AppError> {
-        let resources = self.store.load_resources()?;
+        let resources = self.load_effective_resources()?;
         match self
             .gpio_manager
-            .validate_config(&resources)
-            .and_then(|_| DeviceRegistry::validate_config(&resources))
+            .validate_config(&resources, &self.schema_registry)
+            .and_then(|_| DeviceRegistry::validate_config(&resources, &self.schema_registry))
         {
             Ok(()) => {
-                let snapshot = self.gpio_manager.snapshot(&resources);
+                let snapshot = self
+                    .gpio_manager
+                    .snapshot(&resources, &self.schema_registry);
                 info!(
                     "GPIO/resource runtime ready for board '{}' with {} module binding(s)",
                     snapshot.board.name,
@@ -164,8 +171,12 @@ impl AppController {
 
             info!("Wi-Fi SSID: {}", cfg.wifi.ssid);
             info!("MQTT host: {}:{}", cfg.mqtt.host, cfg.mqtt.port);
-            let mut resources = self.store.load_resources()?;
-            let contract = MqttContract::new(&cfg.mqtt, BoardProfile::esp32_devkit_v1());
+            let mut resources = self.load_effective_resources()?;
+            let contract = MqttContract::new(
+                &cfg.mqtt,
+                BoardProfile::esp32_devkit_v1(),
+                &self.schema_registry,
+            );
             let (command_tx, command_rx) = mpsc::channel();
 
             self.set_operational_action(Some(RuntimeAction::WifiConnecting));
@@ -180,7 +191,8 @@ impl AppController {
                     ModuleManager::empty()
                 }
             };
-            let mut device_registry = match DeviceRegistry::load(&resources) {
+            let mut device_registry = match DeviceRegistry::load(&resources, &self.schema_registry)
+            {
                 Ok(registry) => registry,
                 Err(error) => {
                     error!("Failed to initialize logical devices: {error}");
@@ -240,6 +252,7 @@ impl AppController {
             loop {
                 if self.signals.is_restart_pending() {
                     self.led_indicator.set_mode(IndicatorMode::Off);
+                    self.led_indicator.tick();
                 }
 
                 if let Some(cfg) = controller.take_pending_wifi_test()? {
@@ -273,7 +286,7 @@ impl AppController {
                     }
                 }
 
-                thread::sleep(Duration::from_millis(200));
+                self.sleep_with_indicator(Duration::from_millis(200));
             }
         })();
 
@@ -304,6 +317,7 @@ impl AppController {
             info!("Runtime state transition: {:?} -> {:?}", self.state, next);
             self.state = next;
             self.led_indicator.set_mode(IndicatorMode::State(next));
+            self.led_indicator.tick();
         }
     }
 
@@ -347,7 +361,7 @@ impl AppController {
         contract: &MqttContract,
         command_tx: &mpsc::Sender<RuntimeCommand>,
         command_rx: &mpsc::Receiver<RuntimeCommand>,
-        resources: &mut crate::config::types::ResourceConfig,
+        resources: &mut ResourceConfig,
         module_manager: &mut ModuleManager,
         device_registry: &mut DeviceRegistry,
     ) -> Result<(), AppError> {
@@ -391,7 +405,7 @@ impl AppController {
                 }
             }
 
-            thread::sleep(Duration::from_millis(200));
+            self.sleep_with_indicator(Duration::from_millis(200));
         }
     }
 
@@ -402,7 +416,7 @@ impl AppController {
         mqtt_config: &crate::config::types::MqttConfig,
         contract: &MqttContract,
         command_tx: &mpsc::Sender<RuntimeCommand>,
-        resources: &crate::config::types::ResourceConfig,
+        resources: &ResourceConfig,
         module_manager: &mut ModuleManager,
         device_registry: &DeviceRegistry,
     ) -> Result<(), AppError> {
@@ -506,9 +520,10 @@ impl AppController {
             self.mqtt_retry_at = None;
             contract.publish_birth(
                 active_mqtt,
-                &self.gpio_manager.snapshot(resources),
+                &self.gpio_manager.snapshot(resources, &self.schema_registry),
                 &device_registry.snapshot(resources),
-                &device_registry.type_schemas(),
+                &self.schema_registry.module_type_snapshots(),
+                &device_registry.type_schemas(&self.schema_registry),
             )?;
             module_manager.publish_initial_states(active_mqtt, contract.topics())?;
             device_registry.publish_initial_states(
@@ -536,7 +551,7 @@ impl AppController {
         &mut self,
         mqtt: &mut mqtt::MqttManager,
         contract: &MqttContract,
-        resources: &mut crate::config::types::ResourceConfig,
+        resources: &mut ResourceConfig,
         module_manager: &mut ModuleManager,
         device_registry: &mut DeviceRegistry,
         action: RuntimeCommand,
@@ -588,19 +603,20 @@ impl AppController {
         &mut self,
         mqtt: &mut mqtt::MqttManager,
         contract: &MqttContract,
-        resources: &mut crate::config::types::ResourceConfig,
+        resources: &mut ResourceConfig,
         module_manager: &mut ModuleManager,
         device_registry: &mut DeviceRegistry,
         action: ContractAction,
     ) -> Result<(), AppError> {
         match action {
             ContractAction::GetConfig { request_id } => {
-                let snapshot = self.gpio_manager.snapshot(resources);
+                let snapshot = self.gpio_manager.snapshot(resources, &self.schema_registry);
                 contract.publish_birth(
                     mqtt,
                     &snapshot,
                     &device_registry.snapshot(resources),
-                    &device_registry.type_schemas(),
+                    &self.schema_registry.module_type_snapshots(),
+                    &device_registry.type_schemas(&self.schema_registry),
                 )?;
                 contract.publish_config_result(
                     mqtt,
@@ -615,11 +631,14 @@ impl AppController {
                 request_id,
                 resources: proposed_resources,
             } => {
+                let (proposed_resources, _) =
+                    DeviceRegistry::normalize_config(&proposed_resources, &self.schema_registry)?;
                 let result = match self
                     .gpio_manager
-                    .validate_config(&proposed_resources)
-                    .and_then(|_| DeviceRegistry::validate_config(&proposed_resources))
-                {
+                    .validate_config(&proposed_resources, &self.schema_registry)
+                    .and_then(|_| {
+                        DeviceRegistry::validate_config(&proposed_resources, &self.schema_registry)
+                    }) {
                     Ok(()) => MqttContract::ok_result(
                         "validate_resources",
                         request_id,
@@ -637,49 +656,60 @@ impl AppController {
             ContractAction::SetResources {
                 request_id,
                 resources: proposed_resources,
-            } => match self
-                .gpio_manager
-                .validate_config(&proposed_resources)
-                .and_then(|_| DeviceRegistry::validate_config(&proposed_resources))
-            {
-                Ok(()) => {
-                    let reloaded_modules = self.load_runtime_modules(&proposed_resources)?;
-                    let reloaded_devices = DeviceRegistry::load(&proposed_resources)?;
-                    self.store.save_resources(&proposed_resources)?;
-                    *resources = proposed_resources;
-                    *module_manager = reloaded_modules;
-                    *device_registry = reloaded_devices;
+            } => {
+                let (proposed_resources, _) =
+                    DeviceRegistry::normalize_config(&proposed_resources, &self.schema_registry)?;
+                match self
+                    .gpio_manager
+                    .validate_config(&proposed_resources, &self.schema_registry)
+                    .and_then(|_| {
+                        DeviceRegistry::validate_config(&proposed_resources, &self.schema_registry)
+                    }) {
+                    Ok(()) => {
+                        let reloaded_modules = self.load_runtime_modules(&proposed_resources)?;
+                        let reloaded_devices =
+                            DeviceRegistry::load(&proposed_resources, &self.schema_registry)?;
+                        self.store.save_resources(&proposed_resources)?;
+                        *resources = proposed_resources;
+                        *module_manager = reloaded_modules;
+                        *device_registry = reloaded_devices;
 
-                    let snapshot = self.gpio_manager.snapshot(resources);
-                    contract.publish_resources_snapshot(mqtt, &snapshot)?;
-                    contract.publish_birth(
-                        mqtt,
-                        &snapshot,
-                        &device_registry.snapshot(resources),
-                        &device_registry.type_schemas(),
-                    )?;
-                    module_manager.publish_initial_states(mqtt, contract.topics())?;
-                    device_registry.publish_initial_states(
-                        mqtt,
-                        contract.topics(),
-                        module_manager,
-                    )?;
-                    contract.publish_config_result(
-                        mqtt,
-                        &MqttContract::ok_result(
-                            "set_resources",
-                            request_id,
-                            "Resource configuration saved successfully.",
-                        ),
-                    )?;
+                        let snapshot = self.gpio_manager.snapshot(resources, &self.schema_registry);
+                        contract.publish_resources_snapshot(mqtt, &snapshot)?;
+                        contract.publish_birth(
+                            mqtt,
+                            &snapshot,
+                            &device_registry.snapshot(resources),
+                            &self.schema_registry.module_type_snapshots(),
+                            &device_registry.type_schemas(&self.schema_registry),
+                        )?;
+                        module_manager.publish_initial_states(mqtt, contract.topics())?;
+                        device_registry.publish_initial_states(
+                            mqtt,
+                            contract.topics(),
+                            module_manager,
+                        )?;
+                        contract.publish_config_result(
+                            mqtt,
+                            &MqttContract::ok_result(
+                                "set_resources",
+                                request_id,
+                                "Resource configuration saved successfully.",
+                            ),
+                        )?;
+                    }
+                    Err(error) => {
+                        contract.publish_config_result(
+                            mqtt,
+                            &MqttContract::error_result(
+                                "set_resources",
+                                request_id,
+                                error.to_string(),
+                            ),
+                        )?;
+                    }
                 }
-                Err(error) => {
-                    contract.publish_config_result(
-                        mqtt,
-                        &MqttContract::error_result("set_resources", request_id, error.to_string()),
-                    )?;
-                }
-            },
+            }
             ContractAction::PublishResult(payload) => {
                 self.publish_contract_result(mqtt, contract, payload)?;
             }
@@ -697,12 +727,35 @@ impl AppController {
         contract.publish_config_result(mqtt, &payload)
     }
 
+    fn load_effective_resources(&self) -> Result<ResourceConfig, AppError> {
+        let stored = self.store.load_resources()?;
+        let (normalized, changed) =
+            DeviceRegistry::normalize_config(&stored, &self.schema_registry)?;
+
+        if changed {
+            info!("Auto-provisioned logical devices for single-device module instances");
+            self.store.save_resources(&normalized)?;
+        }
+
+        Ok(normalized)
+    }
+
+    fn sleep_with_indicator(&mut self, duration: Duration) {
+        let started_at = Instant::now();
+
+        while started_at.elapsed() < duration {
+            self.led_indicator.tick();
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn load_runtime_modules(
         &mut self,
-        resources: &crate::config::types::ResourceConfig,
+        resources: &ResourceConfig,
     ) -> Result<ModuleManager, AppError> {
         let mut gpio_manager = GpioManager::new(BoardProfile::esp32_devkit_v1());
-        let module_manager = ModuleManager::load(resources, &mut gpio_manager)?;
+        let module_manager =
+            ModuleManager::load(resources, &mut gpio_manager, &self.schema_registry)?;
         self.gpio_manager = gpio_manager;
         Ok(module_manager)
     }
@@ -723,7 +776,7 @@ impl AppController {
                         DegradedReason::WifiDisconnected,
                         Some(RuntimeAction::WifiConnecting),
                     );
-                    thread::sleep(Duration::from_secs(2));
+                    self.sleep_with_indicator(Duration::from_secs(2));
                 }
             }
         }
@@ -733,7 +786,7 @@ impl AppController {
         &mut self,
         mqtt_config: &crate::config::types::MqttConfig,
         contract: &MqttContract,
-        resources: &crate::config::types::ResourceConfig,
+        resources: &ResourceConfig,
         module_manager: &mut ModuleManager,
         device_registry: &DeviceRegistry,
         command_tx: &mpsc::Sender<RuntimeCommand>,
@@ -789,9 +842,10 @@ impl AppController {
         })?;
         contract.publish_birth(
             &mut mqtt,
-            &self.gpio_manager.snapshot(resources),
+            &self.gpio_manager.snapshot(resources, &self.schema_registry),
             &device_registry.snapshot(resources),
-            &device_registry.type_schemas(),
+            &self.schema_registry.module_type_snapshots(),
+            &device_registry.type_schemas(&self.schema_registry),
         )?;
         module_manager.publish_initial_states(&mut mqtt, contract.topics())?;
         device_registry.publish_initial_states(&mut mqtt, contract.topics(), module_manager)?;

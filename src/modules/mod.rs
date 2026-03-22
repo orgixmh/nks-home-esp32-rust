@@ -4,7 +4,6 @@ mod relay_gpio;
 mod traits;
 
 pub use manager::ModuleManager;
-pub use traits::Module;
 
 #[derive(Debug, Clone)]
 pub struct ModuleCommand {
